@@ -3,10 +3,15 @@ Keepa APIで Amazon.co.jp の価格・在庫を確認するモジュール
 """
 
 import keepa
+import time
 
 # トークンが少ないときの閾値
 MIN_TOKENS_CHECK = 20   # check()/jan_to_asin()を実行する最低トークン数
 MIN_TOKENS_LIST  = 50   # fetch_listing_details()を実行する最低トークン数
+
+# トークン待機設定
+TOKEN_WAIT_SECONDS = 60   # トークン不足時の待機秒数
+TOKEN_WAIT_RETRIES = 5    # 最大リトライ回数
 
 
 class KeepaChecker:
@@ -18,12 +23,29 @@ class KeepaChecker:
     def tokens_left(self) -> int:
         return self.api.tokens_left
 
+    def _refresh_tokens(self):
+        """Keepaのトークン残量を最新状態に更新する"""
+        try:
+            self.api.query("B00000J1ER", domain="JP", history=False, offers=0, stock=False)
+        except Exception:
+            pass
+
+    def _wait_for_tokens(self, required: int, label: str = "") -> bool:
+        """トークンが溜まるまで待機してリトライする"""
+        for attempt in range(TOKEN_WAIT_RETRIES):
+            self._refresh_tokens()
+            if self.api.tokens_left >= required:
+                return True
+            print(f"  ⏳ トークン待機中（残: {self.api.tokens_left} / 必要: {required}）{label} → {TOKEN_WAIT_SECONDS}秒後にリトライ ({attempt+1}/{TOKEN_WAIT_RETRIES})")
+            time.sleep(TOKEN_WAIT_SECONDS)
+        print(f"  ⚠️  Keepaトークン不足（残: {self.api.tokens_left} / 必要: {required}）{label}")
+        return False
+
     def _check_tokens(self, required: int, label: str = "") -> bool:
-        """トークンが足りない場合に警告してFalseを返す"""
-        if self.api.tokens_left < required:
-            print(f"  ⚠️  Keepaトークン不足（残: {self.api.tokens_left} / 必要: {required}）{label}")
-            return False
-        return True
+        """トークンが足りない場合は待機してリトライ、それでも足りなければFalseを返す"""
+        if self.api.tokens_left >= required:
+            return True
+        return self._wait_for_tokens(required, label)
 
     def check(self, asin: str) -> dict:
         """
