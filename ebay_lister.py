@@ -541,7 +541,7 @@ def fetch_listing_details(keepa_api, asin: str) -> dict:
             [asin],
             domain='JP',
             history=False,  # 履歴不要（トークン節約）
-            offers=5,       # offers数を減らしてトークン節約
+            offers=20,      # 最小値20
             stock=True,
             wait=True,
         )

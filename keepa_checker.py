@@ -47,7 +47,7 @@ class KeepaChecker:
                 [asin],
                 domain='JP',       # Amazon.co.jp
                 history=False,     # 履歴不要（高速化・トークン節約）
-                offers=5,          # offers数を減らしてトークン節約
+                offers=20,         # 最小値20
                 stock=True,
                 wait=True,
             )
