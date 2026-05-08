@@ -1,0 +1,44 @@
+# GitHub Actions: 毎日自動実行ワークフロー
+# .github/workflows/daily_check.yml に配置
+
+name: 毎日チェック（価格・在庫）
+
+on:
+  # 毎日 日本時間 4:00（UTC 19:00）と 16:00（UTC 7:00）に実行
+  schedule:
+    - cron: "0 19 * * *"
+    - cron: "0 7 * * *"
+
+  # 手動実行ボタン
+  workflow_dispatch:
+
+jobs:
+  daily-check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: リポジトリをチェックアウト
+        uses: actions/checkout@v3
+
+      - name: Python 3.11 セットアップ
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: ライブラリインストール
+        run: pip install keepa requests gspread google-auth pandas python-dotenv
+
+      - name: .env ファイルを作成
+        run: |
+          echo "KEEPA_API_KEY=${{ secrets.KEEPA_API_KEY }}" >> .env
+          echo "EBAY_TOKEN=${{ secrets.EBAY_TOKEN }}" >> .env
+          echo "ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}" >> .env
+          echo "SHEET_ID=${{ secrets.SHEET_ID }}" >> .env
+          echo "SLACK_WEBHOOK=${{ secrets.SLACK_WEBHOOK }}" >> .env
+          echo "LINE_TOKEN=${{ secrets.LINE_TOKEN }}" >> .env
+
+      - name: Google認証ファイルを作成
+        run: echo '${{ secrets.GSHEET_CREDENTIALS }}' > credentials.json
+
+      - name: 毎日チェック実行
+        run: python main.py

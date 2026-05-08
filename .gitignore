@@ -1,0 +1,36 @@
+# 認証情報・シークレット
+.env
+credentials.json
+*.json.bak
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# 仮想環境
+venv/
+.venv/
+env/
+.env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# ログ・一時ファイル
+*.log
+*.tmp
