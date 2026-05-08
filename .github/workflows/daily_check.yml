@@ -38,7 +38,9 @@ jobs:
           echo "LINE_TOKEN=${{ secrets.LINE_TOKEN }}" >> .env
 
       - name: Google認証ファイルを作成
-        run: echo '${{ secrets.GSHEET_CREDENTIALS }}' > credentials.json
+        run: echo "$GSHEET_CREDENTIALS" > credentials.json
+        env:
+          GSHEET_CREDENTIALS: ${{ secrets.GSHEET_CREDENTIALS }}
 
       - name: 毎日チェック実行
         run: python main.py
