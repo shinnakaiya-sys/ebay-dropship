@@ -42,5 +42,10 @@ jobs:
         env:
           GSHEET_CREDENTIALS: ${{ secrets.GSHEET_CREDENTIALS }}
 
+      - name: 認証ファイル確認
+        run: |
+          echo "ファイルサイズ: $(wc -c < credentials.json) bytes"
+          echo "先頭5文字: $(head -c 5 credentials.json)"
+
       - name: 毎日チェック実行
         run: python main.py
