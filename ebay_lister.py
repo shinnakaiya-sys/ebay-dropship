@@ -535,39 +535,40 @@ def calc_sell_price(amazon_price_jpy: float, config: dict) -> float:
 # ──────────────────────────────────────────────────────────
 
 def fetch_listing_details(keepa_api, asin: str) -> dict:
-    """出品に必要な詳細情報をKeepaから取得"""
+    """出品に必要な詳細情報をKeepa REST APIで直接取得"""
+    import requests
+    from config import CONFIG
+
     try:
-        products = keepa_api.api.query(
-            [asin],
-            domain='JP',
-            history=False,  # 履歴不要（トークン節約）
-            offers=20,      # 最小値20
-            stock=True,
-            wait=True,
+        resp = requests.get(
+            "https://api.keepa.com/product",
+            params={
+                "key":     CONFIG["KEEPA_API_KEY"],
+                "domain":  "5",
+                "asin":    asin,
+                "history": "0",
+                "offers":  "20",
+                "stock":   "1",
+            },
+            timeout=30,
         )
-        print(f"    トークン残: {keepa_api.tokens_left}")
+        data = resp.json()
+        products = data.get("products", [])
         if not products:
+            print(f"  ⚠️  Keepa: 商品が見つかりません ({asin})")
             return {}
 
         p = products[0]
 
         # 画像URL生成
-        # Keepa Pythonライブラリは images キーに辞書リストを返す
-        # {'l': '大画像ID.jpg', 'm': '中画像ID.jpg', ...}
         image_urls = []
         images = p.get("images") or []
         for img in images[:12]:
             if isinstance(img, dict):
-                # 中画像(m)を優先、なければ大画像(l)
                 img_id = img.get("m") or img.get("l") or ""
             else:
                 img_id = str(img)
-            if img_id and "+" not in img_id:  # +を含むURLは無効になる場合がある
-                image_urls.append(
-                    f"https://images-na.ssl-images-amazon.com/images/I/{img_id}"
-                )
-            elif img_id:
-                # +を%2Bにエンコード
+            if img_id:
                 img_id_encoded = img_id.replace("+", "%2B")
                 image_urls.append(
                     f"https://images-na.ssl-images-amazon.com/images/I/{img_id_encoded}"
@@ -576,30 +577,29 @@ def fetch_listing_details(keepa_api, asin: str) -> dict:
         # 商品特徴
         features = p.get("features", []) or []
 
-        # 現在価格（複数ソースを順番に試す）
-        # csv[0]=Amazon直販, csv[1]=新品出品者, csv[3]=新品最安値
-        # Keepaの価格単位: 円そのまま（/100不要）
+        # 現在価格（csv[0]=Amazon直販, csv[1]=新品出品者, csv[3]=新品最安値）
+        # Keepa価格単位: 円×100 → /100で円に変換
         csv = p.get("csv", []) or []
         price = 0
-        for idx in [0, 1, 3]:
+        for idx in [0, 1, 3, 7, 11]:
             if idx >= len(csv):
                 continue
             series = csv[idx]
             if series:
                 valid = [x for x in series if x and x > 0]
                 if valid:
-                    price = valid[-1]  # 円そのまま
+                    price = valid[-1] / 100  # 円×100 → 円
                     break
 
         in_stock = price > 0
         print(f"  💴 取得価格: ¥{price:,.0f} / 在庫: {'あり' if in_stock else 'なし'}")
+        print(f"    トークン残: {data.get('tokensLeft', 'N/A')}")
 
         upc_list = p.get("upcList") or []
         ean_list = p.get("eanList") or []
         part_num = p.get("partNumber") or ""
         model    = p.get("model") or ""
 
-        # JANコード: EANを優先（日本商品はEANがJANコードに相当）
         upc = ean_list[0] if ean_list else (upc_list[0] if upc_list else "Does not apply")
         mpn = part_num or model or "Does Not Apply"
 
