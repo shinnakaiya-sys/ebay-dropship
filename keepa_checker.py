@@ -98,19 +98,25 @@ class KeepaChecker:
     def jan_to_asin(self, jan_code: str) -> str:
         """
         JANコード（EAN）からASINを逆引きする
-        KeepaのqueryメソッドにEANを直接渡す
+        KeepaのSearch APIを使用
         """
+        import requests
+        from config import CONFIG
+
         try:
-            # KeepaはEAN/JANコードをリストで渡す（wait=Trueでトークン不足時は自動待機）
-            products = self.api.query(
-                [jan_code],    # リスト形式で渡す
-                domain="JP",
-                history=False,
-                offers=0,
-                stock=False,
-                wait=True,
+            resp = requests.get(
+                "https://api.keepa.com/search",
+                params={
+                    "key":    CONFIG["KEEPA_API_KEY"],
+                    "domain": "5",
+                    "type":   "product",
+                    "term":   jan_code,
+                },
+                timeout=15,
             )
-            if products and len(products) > 0:
+            data = resp.json()
+            products = data.get("products", [])
+            if products:
                 asin = products[0].get("asin", "")
                 if asin:
                     print(f"  🔍 JAN→ASIN変換: {jan_code} → {asin}")
