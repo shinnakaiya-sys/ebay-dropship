@@ -42,9 +42,6 @@ class KeepaChecker:
                 "review_count": int,
             }
         """
-        if not self._check_tokens(MIN_TOKENS_CHECK, f"- {asin}"):
-            return self._empty_result(asin)
-
         try:
             products = self.api.query(
                 [asin],
@@ -52,6 +49,7 @@ class KeepaChecker:
                 history=False,     # 履歴不要（高速化・トークン節約）
                 offers=5,          # offers数を減らしてトークン節約
                 stock=True,
+                wait=True,
             )
             print(f"    トークン残: {self.api.tokens_left}")
 
@@ -102,17 +100,15 @@ class KeepaChecker:
         JANコード（EAN）からASINを逆引きする
         KeepaのqueryメソッドにEANを直接渡す
         """
-        if not self._check_tokens(MIN_TOKENS_CHECK, f"- JAN:{jan_code}"):
-            return ""
-
         try:
-            # KeepaはEAN/JANコードをリストで渡す
+            # KeepaはEAN/JANコードをリストで渡す（wait=Trueでトークン不足時は自動待機）
             products = self.api.query(
                 [jan_code],    # リスト形式で渡す
                 domain="JP",
                 history=False,
                 offers=0,
                 stock=False,
+                wait=True,
             )
             if products and len(products) > 0:
                 asin = products[0].get("asin", "")

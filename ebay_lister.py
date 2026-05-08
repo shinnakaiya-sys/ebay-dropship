@@ -536,10 +536,6 @@ def calc_sell_price(amazon_price_jpy: float, config: dict) -> float:
 
 def fetch_listing_details(keepa_api, asin: str) -> dict:
     """出品に必要な詳細情報をKeepaから取得"""
-    from keepa_checker import MIN_TOKENS_LIST
-    if not keepa_api._check_tokens(MIN_TOKENS_LIST, f"- {asin}（出品詳細取得）"):
-        return {}
-
     try:
         products = keepa_api.api.query(
             [asin],
@@ -547,6 +543,7 @@ def fetch_listing_details(keepa_api, asin: str) -> dict:
             history=False,  # 履歴不要（トークン節約）
             offers=5,       # offers数を減らしてトークン節約
             stock=True,
+            wait=True,
         )
         print(f"    トークン残: {keepa_api.tokens_left}")
         if not products:
