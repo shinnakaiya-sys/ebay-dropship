@@ -32,10 +32,11 @@ EBAY_API_URL = "https://api.ebay.com/ws/api.dll"
 EBAY_CATEGORY_MAP = {
     "electronics":   9355,    # Consumer Electronics
     "toys":          220,     # Toys & Hobbies
+    "model_kits":    2592,    # Toys & Hobbies > Models & Kits > Cars, Trucks & Vans
     "sports":        888,     # Sporting Goods
     "home":          11700,   # Home & Garden
     "fashion":       11450,   # Clothing, Shoes & Accessories
-    "default":       14943,   # Cameras & Photo > Other
+    "default":       2592,    # デフォルト: モデルキット（Cars, Trucks & Vans）
 }
 
 # 出品期間（日）
@@ -55,7 +56,7 @@ class EbayLister:
     # ──────────────────────────────────────────────────────
     # メイン出品処理
     # ──────────────────────────────────────────────────────
-    def list_item(self, product: dict) -> dict:
+    def list_item(self, product: dict, sku: str = "") -> dict:
         """
         1商品をeBayに出品する
 
@@ -78,7 +79,7 @@ class EbayLister:
                 "message": str,
             }
         """
-        xml_body = self._build_add_item_xml(product)
+        xml_body = self._build_add_item_xml(product, sku=sku)
 
         try:
             resp = requests.post(
@@ -95,7 +96,7 @@ class EbayLister:
     # ──────────────────────────────────────────────────────
     # AddItem XML を構築
     # ──────────────────────────────────────────────────────
-    def _build_add_item_xml(self, p: dict) -> str:
+    def _build_add_item_xml(self, p: dict, sku: str = "") -> str:
         # 商品仕様（Item Specifics）をXMLに変換
         specifics_xml = ""
         for name, value in p.get("item_specifics", {}).items():
@@ -117,8 +118,6 @@ class EbayLister:
         cat_id   = p.get("category_id", EBAY_CATEGORY_MAP["default"])
         cond_id  = self._condition_id(p.get("condition", "New"))
         desc     = p["description"].replace("]]>", "]]]]><![CDATA[>")
-        ship_usd = CONFIG["SHIPPING_USD"]
-
         upc  = p.get("upc", "Does not apply")
 
         xml = (
@@ -137,6 +136,7 @@ class EbayLister:
             f"<ConditionID>{cond_id}</ConditionID>"
             "<Country>JP</Country>"
             "<Currency>USD</Currency>"
+            + (f"<SKU>{sku}</SKU>" if sku else "") +
             "<Location>Tokyo, Japan</Location>"
             "<DispatchTimeMax>7</DispatchTimeMax>"
             "<ListingDuration>GTC</ListingDuration>"
@@ -157,7 +157,7 @@ class EbayLister:
         xml += (
             "<SellerProfiles>"
             "<SellerShippingProfile>"
-            "<ShippingProfileID>362218680023</ShippingProfileID>"
+            "<ShippingProfileID>392355301023</ShippingProfileID>"
             "</SellerShippingProfile>"
             "<SellerReturnProfile>"
             "<ReturnProfileID>260040355023</ReturnProfileID>"
@@ -260,6 +260,8 @@ def get_best_category(token: str, title: str, jan_code: str = "") -> int:
                 data=xml_body.encode("utf-8"),
                 timeout=15,
             )
+            if resp.status_code != 200:
+                raise ValueError(f"HTTP {resp.status_code}")
             root = ET.fromstring(resp.text)
             ns = {"e": "urn:ebay:apis:eBLBaseComponents"}
             ack = root.findtext("e:Ack", namespaces=ns)
@@ -302,6 +304,8 @@ def get_best_category(token: str, title: str, jan_code: str = "") -> int:
             data=xml_body.encode("utf-8"),
             timeout=15,
         )
+        if resp.status_code != 200:
+            raise ValueError(f"HTTP {resp.status_code}")
         root = ET.fromstring(resp.text)
         ns = {"e": "urn:ebay:apis:eBLBaseComponents"}
         suggestions = root.findall(".//e:SuggestedCategory", ns)
@@ -396,7 +400,13 @@ def build_listing_data(asin: str, keepa_data: dict, config: dict) -> dict:
     - 価格: 仕入れ値から利益率・手数料込みで計算
     """
     amazon_price  = keepa_data["current_price"]
-    sell_price    = calc_sell_price(amazon_price, config)
+    sell_price    = calc_sell_price(
+        amazon_price, config,
+        weight_kg  = keepa_data.get("weight_kg", 1.0),
+        length_cm  = keepa_data.get("length_cm", 0),
+        width_cm   = keepa_data.get("width_cm",  0),
+        height_cm  = keepa_data.get("height_cm", 0),
+    )
     jp_title      = keepa_data.get("title", "")
     brand         = keepa_data.get("brand", "")
     manufacturer  = keepa_data.get("manufacturer", "")
@@ -411,6 +421,8 @@ def build_listing_data(asin: str, keepa_data: dict, config: dict) -> dict:
     item_specifics = {}
     item_specifics["Brand"]    = brand or "Does Not Apply"
     item_specifics["MPN"]      = mpn
+    item_specifics["Type"]     = "Model Kit"
+    item_specifics["Scale"]    = "1:24"
     if manufacturer:
         item_specifics["Manufacturer"] = manufacturer
     item_specifics["Country/Region of Manufacture"] = "Japan"
@@ -521,12 +533,17 @@ Use inline CSS for styling. Keep total under 800 words. Reply with ONLY the HTML
 """
 
 
-def calc_sell_price(amazon_price_jpy: float, config: dict) -> float:
-    """Amazon円価格 → eBayドル売値"""
-    usd  = amazon_price_jpy / config["JPY_TO_USD"]
-    usd += config["SHIPPING_USD"]
-    usd  = usd / (1 - config["EBAY_FEE_RATE"])
-    usd  = usd / (1 - config["TARGET_MARGIN"])
+def calc_sell_price(amazon_price_jpy: float, config: dict, weight_kg: float = 1.0,
+                    length_cm: float = 0, width_cm: float = 0, height_cm: float = 0) -> float:
+    """Amazon円価格 → eBayドル売値（SpeedPAK実送料を使用）"""
+    from shipping_calculator import get_shipping_jpy
+    shipping_jpy = get_shipping_jpy(weight_kg, destination="US48",
+                                    length_cm=length_cm, width_cm=width_cm, height_cm=height_cm)
+    total_cost_jpy = amazon_price_jpy + shipping_jpy
+    usd = total_cost_jpy / config["JPY_TO_USD"]
+    usd = usd / (1 - config["EBAY_FEE_RATE"])
+    usd = usd / (1 - config["TARGET_MARGIN"])
+    print(f"  📦 送料: ¥{shipping_jpy:,}（{weight_kg}kg → US48）")
     return round(usd, 2)
 
 
@@ -546,7 +563,7 @@ def fetch_listing_details(keepa_api, asin: str) -> dict:
                 "key":     CONFIG["KEEPA_API_KEY"],
                 "domain":  "5",
                 "asin":    asin,
-                "history": "0",
+                "history": "1",
                 "offers":  "20",
                 "stock":   "1",
             },
@@ -578,18 +595,22 @@ def fetch_listing_details(keepa_api, asin: str) -> dict:
         features = p.get("features", []) or []
 
         # 現在価格（csv[0]=Amazon直販, csv[1]=新品出品者, csv[3]=新品最安値）
-        # Keepa価格単位: 円×100 → /100で円に変換
+        # Keepa CSV形式: [timestamp, price, timestamp, price, ...]（交互）
+        # Japan domain (domain=5) の価格は円をそのまま格納（÷100不要）
+        # 価格なし/在庫切れは -1 で表現
         csv = p.get("csv", []) or []
         price = 0
-        for idx in [0, 1, 3, 7, 11]:
+        for idx in [0, 1, 3]:
             if idx >= len(csv):
                 continue
             series = csv[idx]
-            if series:
-                valid = [x for x in series if x and x > 0]
-                if valid:
-                    price = valid[-1] / 100  # 円×100 → 円
-                    break
+            if not series:
+                continue
+            # 奇数インデックス（価格部分のみ）を抽出: series[1::2]
+            prices = [v for v in series[1::2] if v and v > 0]
+            if prices:
+                price = prices[-1]  # 最新価格（円）
+                break
 
         in_stock = price > 0
         print(f"  💴 取得価格: ¥{price:,.0f} / 在庫: {'あり' if in_stock else 'なし'}")
@@ -601,7 +622,25 @@ def fetch_listing_details(keepa_api, asin: str) -> dict:
         model    = p.get("model") or ""
 
         upc = ean_list[0] if ean_list else (upc_list[0] if upc_list else "Does not apply")
-        mpn = part_num or model or "Does Not Apply"
+        raw_mpn = part_num or model or ""
+        # 数字のみ（JAN/EAN/UPCコード）はMPNとして無効なので除外
+        mpn = raw_mpn if (raw_mpn and not raw_mpn.isdigit()) else "Does Not Apply"
+
+        # 重量・寸法（Keepa: 重量はg、寸法はmm）
+        pkg_weight_g  = p.get("packageWeight") or 0   # グラム
+        pkg_length_mm = p.get("packageLength") or 0
+        pkg_width_mm  = p.get("packageWidth")  or 0
+        pkg_height_mm = p.get("packageHeight") or 0
+
+        weight_kg  = (pkg_weight_g  / 1000) if pkg_weight_g  else 1.0  # 不明時は1kg
+        length_cm  = (pkg_length_mm / 10)   if pkg_length_mm else 0
+        width_cm   = (pkg_width_mm  / 10)   if pkg_width_mm  else 0
+        height_cm  = (pkg_height_mm / 10)   if pkg_height_mm else 0
+
+        if pkg_weight_g:
+            print(f"  ⚖️  重量: {weight_kg:.3f}kg / 寸法: {length_cm}×{width_cm}×{height_cm}cm")
+        else:
+            print(f"  ⚖️  重量不明 → デフォルト1.0kgを使用")
 
         return {
             "title":         p.get("title", ""),
@@ -615,6 +654,10 @@ def fetch_listing_details(keepa_api, asin: str) -> dict:
             "review_count":  p.get("reviewCount", 0),
             "upc":           upc,
             "mpn":           mpn,
+            "weight_kg":     weight_kg,
+            "length_cm":     length_cm,
+            "width_cm":      width_cm,
+            "height_cm":     height_cm,
         }
 
     except Exception as e:
@@ -691,8 +734,9 @@ def main():
             print(f"  ✅ [DRY RUN] 出品データ確認OK")
             continue
 
-        # eBayに出品
-        result = lister.list_item(listing)
+        # eBayに出品（JANコードをSKUとして設定）
+        sku = jan_code if jan_code.isdigit() else ""
+        result = lister.list_item(listing, sku=sku)
 
         if result["success"]:
             ebay_id = result["item_id"]
