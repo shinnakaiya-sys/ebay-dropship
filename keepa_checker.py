@@ -91,7 +91,7 @@ class KeepaChecker:
             new_min_price = self._get_latest_price(csv, index=1)
 
             # カート価格 → Amazon直販 → 新品最安値 の優先順
-            best_price = amazon_price or new_min_price or 0
+            best_price = new_min_price or amazon_price or 0
 
             # 在庫判定
             in_stock = best_price > 0
