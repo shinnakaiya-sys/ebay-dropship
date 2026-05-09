@@ -116,6 +116,14 @@ class SheetsManager:
     # ──────────────────────────────────────────────────────
     # 商品マスタ: ステータス更新
     # ──────────────────────────────────────────────────────
+    def update_last_checked(self, asin: str):
+        """最終チェック日のみ更新（変動なし時に使用）"""
+        ws = self.sheet.worksheet(SHEET_MASTER)
+        cell = self._find_asin_cell(ws, asin)
+        if cell:
+            today = datetime.now().strftime("%Y-%m-%d %H:%M")
+            ws.update_cell(cell.row, 8, today)
+
     def update_status(self, asin: str, status: str):
         ws = self.sheet.worksheet(SHEET_MASTER)
         cell = self._find_asin_cell(ws, asin)
