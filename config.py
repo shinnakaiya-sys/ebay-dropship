@@ -24,13 +24,13 @@ CONFIG = {
 
     # ── 価格・通貨設定 ───────────────────────────
     "JPY_TO_USD":       155.0,    # 為替レート（定期的に更新推奨）
-    "EBAY_FEE_RATE":    0.1325,   # eBay手数料 13.25%
-    "SHIPPING_USD":     15.0,     # 国際送料（ドル）
-    "TARGET_MARGIN":    0.20,     # 目標利益率 20%
+    "EBAY_FEE_RATE":    0.17,     # eBay手数料 17%
+    "TARIFF_RATE":      0.15,     # 関税 15%
+    "TARGET_MARGIN":    0.01,     # 目標利益率 1%
 
     # ── チェック閾値 ─────────────────────────────
     # この割合以上価格が変動したらeBayを更新する（5% = 0.05）
-    "PRICE_CHANGE_THRESHOLD": 0.05,
+    "PRICE_CHANGE_THRESHOLD": 0.01,
 
     # ── Keepa設定 ────────────────────────────────
     "KEEPA_DOMAIN":     "JP",        # 5 = Amazon.co.jp
