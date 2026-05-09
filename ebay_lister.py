@@ -108,10 +108,15 @@ class EbayLister:
             )
 
         # 画像URL（最大12枚）
-        images_xml = ""
-        for url in p.get("image_urls", [])[:12]:
-            if url:
-                images_xml += f"<PictureURL>{url}</PictureURL>"
+        # 画像を最大12枚になるまで繰り返し挿入
+        raw_images = [url for url in p.get("image_urls", []) if url]
+        if raw_images:
+            # 12枚になるまで繰り返す
+            import itertools
+            images_12 = list(itertools.islice(itertools.cycle(raw_images), 12))
+        else:
+            images_12 = []
+        images_xml = "".join(f"<PictureURL>{url}</PictureURL>" for url in images_12)
 
         title    = self._escape_xml(p["title"][:80])
         price    = p["price_usd"]
