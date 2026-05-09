@@ -142,6 +142,7 @@ class EbayLister:
             "<ListingDuration>GTC</ListingDuration>"
             "<ListingType>FixedPriceItem</ListingType>"
             "<Quantity>1</Quantity>"
+            "<SKU>" + str(upc) + "</SKU>"
             "<ShipToLocations>Worldwide</ShipToLocations>"
             "<ProductListingDetails>"
             f"<UPC>{upc}</UPC>"
