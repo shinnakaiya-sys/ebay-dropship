@@ -43,4 +43,4 @@ jobs:
           GSHEET_CREDENTIALS: ${{ secrets.GSHEET_CREDENTIALS }}
 
       - name: 毎日チェック実行
-        run: python main.py
+        run: python run.py
