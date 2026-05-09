@@ -594,24 +594,19 @@ def fetch_listing_details(keepa_api, asin: str) -> dict:
         # 商品特徴
         features = p.get("features", []) or []
 
-        # 現在価格（csv[0]=Amazon直販, csv[1]=新品出品者, csv[3]=新品最安値）
-        # Keepa CSV形式: [timestamp, price, timestamp, price, ...]（交互）
-        # Japan domain (domain=5) の価格は円をそのまま格納（÷100不要）
-        # 価格なし/在庫切れは -1 で表現
+        # 現在価格: 新品最安値(csv[1])優先 → Amazon直販(csv[0])
         csv = p.get("csv", []) or []
         price = 0
-        for idx in [0, 1, 3]:
+        for idx in [1, 0, 3]:  # 新品最安値優先
             if idx >= len(csv):
                 continue
             series = csv[idx]
             if not series:
                 continue
-            # 奇数インデックス（価格部分のみ）を抽出: series[1::2]
             prices = [v for v in series[1::2] if v and v > 0]
             if prices:
-                price = prices[-1]  # 最新価格（円）
+                price = prices[-1]
                 break
-
         in_stock = price > 0
         print(f"  💴 取得価格: ¥{price:,.0f} / 在庫: {'あり' if in_stock else 'なし'}")
         print(f"    トークン残: {data.get('tokensLeft', 'N/A')}")

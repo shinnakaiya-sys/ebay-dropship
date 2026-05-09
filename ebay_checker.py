@@ -102,19 +102,44 @@ class EbayChecker:
         return self._call_api("ReviseItem", xml_body, item_id, "価格更新")
 
     # ──────────────────────────────────────────────────────
-    # 出品停止（在庫切れ時）
+    # 在庫数を0に更新（在庫切れ時・出品は残す）
     # ──────────────────────────────────────────────────────
     def end_listing(self, item_id: str) -> bool:
-        """出品を終了する（在庫切れ時）"""
-        xml_body = f"""<?xml version="1.0" encoding="utf-8"?>
-<EndItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
-  <RequesterCredentials>
-    <eBayAuthToken>{self.token}</eBayAuthToken>
-  </RequesterCredentials>
-  <ItemID>{item_id}</ItemID>
-  <EndingReason>NotAvailable</EndingReason>
-</EndItemRequest>"""
+        """在庫数を0に更新する（出品停止ではなく在庫0にする）"""
+        return self.update_quantity(item_id, 0)
 
+    def update_quantity(self, item_id: str, quantity: int) -> bool:
+        """在庫数を更新する"""
+        xml_body = (
+            "<?xml version=" + chr(34) + "1.0" + chr(34) + " encoding=" + chr(34) + "utf-8" + chr(34) + "?>"
+            "<ReviseItemRequest xmlns=" + chr(34) + "urn:ebay:apis:eBLBaseComponents" + chr(34) + ">"
+            "<RequesterCredentials>"
+            "<eBayAuthToken>" + self.token + "</eBayAuthToken>"
+            "</RequesterCredentials>"
+            "<Item>"
+            "<ItemID>" + str(item_id) + "</ItemID>"
+            "<Quantity>" + str(quantity) + "</Quantity>"
+            "</Item>"
+            "</ReviseItemRequest>"
+        )
+        action = f"在庫数{quantity}に更新"
+        return self._call_api("ReviseItem", xml_body, item_id, action)
+
+    # ──────────────────────────────────────────────────────
+    # 出品停止（完全終了が必要な場合のみ使用）
+    # ──────────────────────────────────────────────────────
+    def end_listing_permanently(self, item_id: str) -> bool:
+        """出品を完全終了する（通常は使わない）"""
+        xml_body = (
+            "<?xml version=" + chr(34) + "1.0" + chr(34) + " encoding=" + chr(34) + "utf-8" + chr(34) + "?>"
+            "<EndItemRequest xmlns=" + chr(34) + "urn:ebay:apis:eBLBaseComponents" + chr(34) + ">"
+            "<RequesterCredentials>"
+            "<eBayAuthToken>" + self.token + "</eBayAuthToken>"
+            "</RequesterCredentials>"
+            "<ItemID>" + str(item_id) + "</ItemID>"
+            "<EndingReason>NotAvailable</EndingReason>"
+            "</EndItemRequest>"
+        )
         return self._call_api("EndItem", xml_body, item_id, "出品停止")
 
     # ──────────────────────────────────────────────────────

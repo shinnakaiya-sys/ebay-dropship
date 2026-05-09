@@ -92,15 +92,15 @@ def main():
         # ケース①: Amazon在庫切れ → eBay出品停止
         if not amazon_in_stock and ebay_active:
             ebay.end_listing(ebay_id)
-            sheets.update_status(asin, "在庫切れ停止")
+            sheets.update_status(asin, "在庫切れ（在庫0）")
             alerts.append({
                 "type": "⛔ 在庫切れ",
                 "asin": asin,
                 "ebay_id": ebay_id,
-                "message": "Amazon在庫切れ → eBay出品停止",
-                "product": product["商品名"][:40],
+                "message": "Amazon在庫切れ → eBay在庫数0に更新",
+                "product": product.get("商品名", "")[:40],
             })
-            print(f"  ⛔ 在庫切れ → eBay出品停止")
+            print(f"  ⛔ 在庫切れ → eBay在庫数0に更新")
             continue
 
         # ケース②: Amazon在庫復活 → eBay出品再開
