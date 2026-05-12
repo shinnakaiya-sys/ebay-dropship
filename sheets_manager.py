@@ -44,6 +44,8 @@ MASTER_COLS = [
     "登録日",          # I
     "メモ",            # J
     "下限価格(USD)",   # K  空欄=グローバル設定を使用
+    "競合最安値(USD)", # L  日本発送セラーの最安値（送料込み）
+    "競合出品数",      # M
 ]
 
 # 出品待ちリストのカラム定義
@@ -229,6 +231,14 @@ class SheetsManager:
     # ──────────────────────────────────────────────────────
     # ヘルパー
     # ──────────────────────────────────────────────────────
+    def update_rival_price(self, asin: str, lowest_price: float, count: int):
+        """競合最安値・競合出品数を更新（L・M列）"""
+        ws = self.sheet.worksheet(SHEET_MASTER)
+        cell = self._find_asin_cell(ws, asin)
+        if cell:
+            ws.update_cell(cell.row, 12, lowest_price if lowest_price > 0 else "")  # L列
+            ws.update_cell(cell.row, 13, count)                                      # M列
+
     def _find_asin_cell(self, ws, asin: str):
         """B列（ASIN）またはA列（JANコード）から検索してセルを返す"""
         try:

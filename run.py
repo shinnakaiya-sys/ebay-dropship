@@ -96,7 +96,21 @@ def main():
         sheets.log_price(asin, "ebay", ebay_price, ebay_active)
 
         # ──────────────────────────────────────
-        # 3. 判定ロジック
+        # 3. 競合（日本発送）最安値を取得
+        # ──────────────────────────────────────
+        rival = ebay.get_jp_lowest_price(
+            ebay_data.get("title", product.get("商品名", "")),
+            CONFIG.get("EBAY_APP_ID", ""),
+            exclude_item_id=ebay_id,
+        )
+        sheets.update_rival_price(asin, rival["lowest_price"], rival["count"])
+        if rival["lowest_price"] > 0:
+            print(f"  🏷️  競合最安値: ${rival['lowest_price']} (出品数:{rival['count']})")
+        else:
+            print(f"  🏷️  競合なし or 取得不可")
+
+        # ──────────────────────────────────────
+        # 4. 判定ロジック
         # ──────────────────────────────────────
 
         # ケース①: Amazon在庫切れ → eBay出品停止

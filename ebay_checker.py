@@ -189,6 +189,71 @@ class EbayChecker:
             print(f"  ❌ {action}エラー ({item_id}): {e}")
             return False
 
+    # ──────────────────────────────────────────────────────
+    # 日本発送セラーの最安値を取得（Finding API）
+    # ──────────────────────────────────────────────────────
+    def get_jp_lowest_price(self, title: str, app_id: str, exclude_item_id: str = "") -> dict:
+        """
+        eBay上の日本発送出品の最安値（送料込み）を取得する
+
+        Returns:
+            {
+                "lowest_price": float,   # 最安値（送料込み、USD）
+                "count": int,            # 日本発送の出品数
+            }
+        """
+        if not app_id:
+            return {"lowest_price": 0.0, "count": 0}
+
+        keywords = " ".join(title.split()[:6])
+        try:
+            resp = requests.get(
+                "https://svcs.ebay.com/services/search/FindingService/v1",
+                params={
+                    "OPERATION-NAME":        "findItemsAdvanced",
+                    "SERVICE-VERSION":       "1.13.0",
+                    "SECURITY-APPNAME":      app_id,
+                    "RESPONSE-DATA-FORMAT":  "JSON",
+                    "keywords":              keywords,
+                    "itemFilter(0).name":    "LocatedIn",
+                    "itemFilter(0).value":   "JP",
+                    "paginationInput.entriesPerPage": "10",
+                    "sortOrder":             "PricePlusShippingLowest",
+                },
+                timeout=10,
+            )
+            data = resp.json()
+            result = data.get("findItemsAdvancedResponse", [{}])[0]
+            items = result.get("searchResult", [{}])[0].get("item", [])
+            total_entries = int(result.get("paginationOutput", [{}])[0].get("totalEntries", ["0"])[0])
+
+            lowest = float("inf")
+            for item in items:
+                if exclude_item_id and item.get("itemId", [""])[0] == exclude_item_id:
+                    continue
+                price = float(
+                    item.get("sellingStatus", [{}])[0]
+                        .get("currentPrice", [{"__value__": "0"}])[0]
+                        .get("__value__", 0)
+                )
+                ship_costs = (
+                    item.get("shippingInfo", [{}])[0]
+                        .get("shippingServiceCost", [])
+                )
+                shipping = float(ship_costs[0].get("__value__", 0)) if ship_costs else 0.0
+                total = price + shipping
+                if total > 0 and total < lowest:
+                    lowest = total
+
+            return {
+                "lowest_price": round(lowest, 2) if lowest != float("inf") else 0.0,
+                "count": total_entries,
+            }
+
+        except Exception as e:
+            print(f"  ⚠️  競合価格取得エラー: {e}")
+            return {"lowest_price": 0.0, "count": 0}
+
     def _empty_result(self, item_id: str) -> dict:
         return {
             "item_id": item_id,
