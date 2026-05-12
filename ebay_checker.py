@@ -212,12 +212,11 @@ class EbayChecker:
             resp = requests.get(
                 "https://svcs.ebay.com/services/search/FindingService/v1",
                 params={
-                    "OPERATION-NAME":        "findItemsByProduct",
+                    "OPERATION-NAME":        "findItemsAdvanced",
                     "SERVICE-VERSION":       "1.13.0",
                     "SECURITY-APPNAME":      app_id,
                     "RESPONSE-DATA-FORMAT":  "JSON",
-                    "productId.type":        "EAN",
-                    "productId.__value__":   str(jan_code),
+                    "keywords":              str(jan_code),
                     "itemFilter(0).name":    "LocatedIn",
                     "itemFilter(0).value":   "JP",
                     "paginationInput.entriesPerPage": "10",
@@ -226,8 +225,7 @@ class EbayChecker:
                 timeout=10,
             )
             data = resp.json()
-            print(f"  🔍 RAW: {str(data)[:300]}")
-            result = data.get("findItemsByProductResponse", [{}])[0]
+            result = data.get("findItemsAdvancedResponse", [{}])[0]
             items = result.get("searchResult", [{}])[0].get("item", [])
             total_entries = int(result.get("paginationOutput", [{}])[0].get("totalEntries", ["0"])[0])
 

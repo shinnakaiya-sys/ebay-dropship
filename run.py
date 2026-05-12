@@ -108,6 +108,7 @@ def main():
             print(f"  🏷️  競合最安値: ${rival['lowest_price']} (出品数:{rival['count']})")
         else:
             print(f"  🏷️  競合なし or 取得不可")
+        time.sleep(1)  # Finding APIレートリミット対策
 
         # ──────────────────────────────────────
         # 4. 判定ロジック
