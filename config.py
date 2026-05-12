@@ -12,7 +12,8 @@ CONFIG = {
     # ── API認証情報 ──────────────────────────────
     "KEEPA_API_KEY":      os.getenv("KEEPA_API_KEY"),
     "EBAY_TOKEN":         os.getenv("EBAY_TOKEN"),
-    "EBAY_APP_ID":        os.getenv("EBAY_APP_ID"),   # Finding API用（開発者ダッシュボードのClient ID）
+    "EBAY_APP_ID":        os.getenv("EBAY_APP_ID"),        # Browse API用 Client ID
+    "EBAY_CLIENT_SECRET": os.getenv("EBAY_CLIENT_SECRET"), # Browse API用 Cert ID
     "ANTHROPIC_API_KEY":  os.getenv("ANTHROPIC_API_KEY"),
     "SLACK_WEBHOOK":      os.getenv("SLACK_WEBHOOK"),    # 任意
     "LINE_TOKEN":         os.getenv("LINE_TOKEN"),        # 任意

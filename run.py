@@ -101,6 +101,7 @@ def main():
         rival = ebay.get_jp_lowest_price(
             product.get("JANコード", ""),
             CONFIG.get("EBAY_APP_ID", ""),
+            client_secret=CONFIG.get("EBAY_CLIENT_SECRET", ""),
             exclude_item_id=ebay_id,
         )
         sheets.update_rival_price(asin, rival["lowest_price"], rival["count"])

@@ -192,9 +192,24 @@ class EbayChecker:
     # ──────────────────────────────────────────────────────
     # 日本発送セラーの最安値を取得（Finding API）
     # ──────────────────────────────────────────────────────
-    def get_jp_lowest_price(self, jan_code: str, app_id: str, exclude_item_id: str = "") -> dict:
+    def _get_browse_token(self, app_id: str, client_secret: str) -> str:
+        """OAuth Client Credentialsでアプリトークンを取得"""
+        import base64
+        credentials = base64.b64encode(f"{app_id}:{client_secret}".encode()).decode()
+        resp = requests.post(
+            "https://api.ebay.com/identity/v1/oauth2/token",
+            headers={
+                "Authorization": f"Basic {credentials}",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            data="grant_type=client_credentials&scope=https%3A%2F%2Fapi.ebay.com%2Foauth%2Fapi_scope",
+            timeout=10,
+        )
+        return resp.json().get("access_token", "")
+
+    def get_jp_lowest_price(self, jan_code: str, app_id: str, client_secret: str = "", exclude_item_id: str = "") -> dict:
         """
-        JANコード（EAN）でeBay上の日本発送出品の最安値（送料込み）を取得する
+        JANコード（EAN）でeBay Browse APIを使い日本発送出品の最安値（送料込み）を取得する
 
         Returns:
             {
@@ -202,48 +217,42 @@ class EbayChecker:
                 "count": int,            # 日本発送の出品数
             }
         """
-        if not app_id:
-            print(f"  ⚠️  EBAY_APP_ID未設定")
+        if not app_id or not client_secret:
+            print(f"  ⚠️  EBAY_APP_ID / EBAY_CLIENT_SECRET未設定")
             return {"lowest_price": 0.0, "count": 0}
         if not jan_code:
             return {"lowest_price": 0.0, "count": 0}
 
         try:
+            token = self._get_browse_token(app_id, client_secret)
+            if not token:
+                print(f"  ⚠️  Browse APIトークン取得失敗")
+                return {"lowest_price": 0.0, "count": 0}
+
             resp = requests.get(
-                "https://svcs.ebay.com/services/search/FindingService/v1",
+                "https://api.ebay.com/buy/browse/v1/item_summary/search",
+                headers={"Authorization": f"Bearer {token}"},
                 params={
-                    "OPERATION-NAME":        "findItemsAdvanced",
-                    "SERVICE-VERSION":       "1.13.0",
-                    "SECURITY-APPNAME":      app_id,
-                    "RESPONSE-DATA-FORMAT":  "JSON",
-                    "keywords":              str(jan_code),
-                    "itemFilter(0).name":    "LocatedIn",
-                    "itemFilter(0).value":   "JP",
-                    "paginationInput.entriesPerPage": "10",
-                    "sortOrder":             "PricePlusShippingLowest",
+                    "q":      str(jan_code),
+                    "filter": "itemLocationCountry:JP",
+                    "sort":   "price",
+                    "limit":  "10",
                 },
                 timeout=10,
             )
             data = resp.json()
-            print(f"  🔍 RAW: {str(data)[:400]}")
-            result = data.get("findItemsAdvancedResponse", [{}])[0]
-            items = result.get("searchResult", [{}])[0].get("item", [])
-            total_entries = int(result.get("paginationOutput", [{}])[0].get("totalEntries", ["0"])[0])
+            items = data.get("itemSummaries", [])
+            total_entries = data.get("total", 0)
 
             lowest = float("inf")
             for item in items:
-                if exclude_item_id and item.get("itemId", [""])[0] == exclude_item_id:
+                if exclude_item_id and item.get("itemId") == exclude_item_id:
                     continue
-                price = float(
-                    item.get("sellingStatus", [{}])[0]
-                        .get("currentPrice", [{"__value__": "0"}])[0]
-                        .get("__value__", 0)
-                )
-                ship_costs = (
-                    item.get("shippingInfo", [{}])[0]
-                        .get("shippingServiceCost", [])
-                )
-                shipping = float(ship_costs[0].get("__value__", 0)) if ship_costs else 0.0
+                # Browse API: price は {"value": "12.99", "currency": "USD"}
+                price = float(item.get("price", {}).get("value", 0))
+                # 送料: shippingOptions[0].shippingCost
+                shipping_options = item.get("shippingOptions", [])
+                shipping = float(shipping_options[0].get("shippingCost", {}).get("value", 0)) if shipping_options else 0.0
                 total = price + shipping
                 if total > 0 and total < lowest:
                     lowest = total
