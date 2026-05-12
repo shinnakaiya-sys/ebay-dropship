@@ -143,7 +143,8 @@ def main():
             print(f"  💰 価格変動 → eBay価格更新 (¥{amazon_price})")
             continue
 
-        sheets.update_last_checked(asin)
+        new_price = calc_sell_price(amazon_price, CONFIG, min_price=product_min_price)
+        sheets.update_price(asin, amazon_price, new_price)
         print(f"  ✔  変動なし（Amazon: ¥{amazon_price} / 在庫: {'あり' if amazon_in_stock else 'なし'}）")
         time.sleep(0.5)  # API制限対策
 
