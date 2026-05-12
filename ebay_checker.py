@@ -245,7 +245,6 @@ class EbayChecker:
             total_entries = data.get("total", 0)
 
             lowest = float("inf")
-            total_sold = 0
             for item in items:
                 if exclude_item_id and item.get("itemId") == exclude_item_id:
                     continue
@@ -255,12 +254,10 @@ class EbayChecker:
                 total = price + shipping
                 if total > 0 and total < lowest:
                     lowest = total
-                total_sold += int(item.get("unitSoldQuantity", 0) or 0)
 
             return {
                 "lowest_price": round(lowest, 2) if lowest != float("inf") else 0.0,
                 "count": total_entries,
-                "total_sold": total_sold,
             }
 
         except Exception as e:
