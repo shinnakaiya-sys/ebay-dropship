@@ -109,7 +109,11 @@ def main():
             print(f"  🏷️  競合最安値: ${rival['lowest_price']} (出品数:{rival['count']})")
         else:
             print(f"  🏷️  競合なし or 取得不可")
-        time.sleep(1)  # Finding APIレートリミット対策
+
+        sold_30d = ebay.get_sold_count_30d(product.get("JANコード", ""), CONFIG.get("EBAY_APP_ID", ""))
+        sheets.update_sold_count(asin, sold_30d)
+        print(f"  📦 30日販売数: {sold_30d}件")
+        time.sleep(1)  # APIレートリミット対策
 
         # ──────────────────────────────────────
         # 4. 判定ロジック

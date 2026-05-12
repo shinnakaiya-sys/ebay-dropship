@@ -46,6 +46,7 @@ MASTER_COLS = [
     "下限価格(USD)",   # K  空欄=グローバル設定を使用
     "競合最安値(USD)", # L  日本発送セラーの最安値（送料込み）
     "競合出品数",      # M
+    "販売数(30日)",   # N  直近30日の販売個数（日本発送）
 ]
 
 # 出品待ちリストのカラム定義
@@ -231,6 +232,13 @@ class SheetsManager:
     # ──────────────────────────────────────────────────────
     # ヘルパー
     # ──────────────────────────────────────────────────────
+    def update_sold_count(self, asin: str, sold_count: int):
+        """直近30日販売数を更新（N列）"""
+        ws = self.sheet.worksheet(SHEET_MASTER)
+        cell = self._find_asin_cell(ws, asin)
+        if cell:
+            ws.update_cell(cell.row, 14, sold_count)  # N列
+
     def update_rival_price(self, asin: str, lowest_price: float, count: int):
         """競合最安値・競合出品数を更新（L・M列）"""
         ws = self.sheet.worksheet(SHEET_MASTER)

@@ -266,6 +266,50 @@ class EbayChecker:
             print(f"  ⚠️  競合価格取得エラー: {e}")
             return {"lowest_price": 0.0, "count": 0}
 
+    # ──────────────────────────────────────────────────────
+    # 直近30日の販売個数を取得（Finding API findCompletedItems）
+    # ──────────────────────────────────────────────────────
+    def get_sold_count_30d(self, jan_code: str, app_id: str) -> int:
+        """
+        JANコードでeBayの直近30日間の販売個数（日本発送）を取得する
+        """
+        if not app_id or not jan_code:
+            return 0
+
+        from datetime import datetime, timedelta, timezone
+        end_time_from = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+        try:
+            resp = requests.get(
+                "https://svcs.ebay.com/services/search/FindingService/v1",
+                params={
+                    "OPERATION-NAME":          "findCompletedItems",
+                    "SERVICE-VERSION":         "1.13.0",
+                    "SECURITY-APPNAME":        app_id,
+                    "RESPONSE-DATA-FORMAT":    "JSON",
+                    "keywords":                str(jan_code),
+                    "itemFilter(0).name":      "LocatedIn",
+                    "itemFilter(0).value":     "JP",
+                    "itemFilter(1).name":      "SoldItemsOnly",
+                    "itemFilter(1).value":     "true",
+                    "itemFilter(2).name":      "EndTimeFrom",
+                    "itemFilter(2).value":     end_time_from,
+                    "paginationInput.entriesPerPage": "100",
+                },
+                timeout=10,
+            )
+            data = resp.json()
+            result = data.get("findCompletedItemsResponse", [{}])[0]
+            # エラーチェック
+            if result.get("ack", [""])[0] == "Failure":
+                return 0
+            total = int(result.get("paginationOutput", [{}])[0].get("totalEntries", ["0"])[0])
+            return total
+
+        except Exception as e:
+            print(f"  ⚠️  販売数取得エラー: {e}")
+            return 0
+
     def _empty_result(self, item_id: str) -> dict:
         return {
             "item_id": item_id,
