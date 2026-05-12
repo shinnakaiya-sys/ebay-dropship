@@ -203,9 +203,11 @@ class EbayChecker:
             }
         """
         if not app_id:
+            print(f"  ⚠️  EBAY_APP_ID未設定")
             return {"lowest_price": 0.0, "count": 0}
 
         keywords = " ".join(title.split()[:6])
+        print(f"  🔍 競合検索キーワード: [{keywords}]")
         try:
             resp = requests.get(
                 "https://svcs.ebay.com/services/search/FindingService/v1",
@@ -224,6 +226,9 @@ class EbayChecker:
             )
             data = resp.json()
             result = data.get("findItemsAdvancedResponse", [{}])[0]
+            ack = result.get("ack", [""])[0]
+            error_msg = result.get("errorMessage", [{}])[0].get("error", [{}])[0].get("message", [""])[0]
+            print(f"  🔍 Finding API ack={ack} error={error_msg or 'none'}")
             items = result.get("searchResult", [{}])[0].get("item", [])
             total_entries = int(result.get("paginationOutput", [{}])[0].get("totalEntries", ["0"])[0])
 
