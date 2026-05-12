@@ -105,14 +105,11 @@ def main():
             exclude_item_id=ebay_id,
         )
         sheets.update_rival_price(asin, rival["lowest_price"], rival["count"])
+        sheets.update_sold_count(asin, rival["total_sold"])
         if rival["lowest_price"] > 0:
-            print(f"  🏷️  競合最安値: ${rival['lowest_price']} (出品数:{rival['count']})")
+            print(f"  🏷️  競合最安値: ${rival['lowest_price']} (出品数:{rival['count']} / 累計販売数:{rival['total_sold']})")
         else:
             print(f"  🏷️  競合なし or 取得不可")
-
-        sold_30d = ebay.get_sold_count_30d(product.get("JANコード", ""), CONFIG.get("EBAY_APP_ID", ""), CONFIG.get("EBAY_CLIENT_SECRET", ""))
-        sheets.update_sold_count(asin, sold_30d)
-        print(f"  📦 30日販売数: {sold_30d}件")
         time.sleep(1)  # APIレートリミット対策
 
         # ──────────────────────────────────────

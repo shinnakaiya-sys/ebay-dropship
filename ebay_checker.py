@@ -245,63 +245,27 @@ class EbayChecker:
             total_entries = data.get("total", 0)
 
             lowest = float("inf")
+            total_sold = 0
             for item in items:
                 if exclude_item_id and item.get("itemId") == exclude_item_id:
                     continue
-                # Browse API: price は {"value": "12.99", "currency": "USD"}
                 price = float(item.get("price", {}).get("value", 0))
-                # 送料: shippingOptions[0].shippingCost
                 shipping_options = item.get("shippingOptions", [])
                 shipping = float(shipping_options[0].get("shippingCost", {}).get("value", 0)) if shipping_options else 0.0
                 total = price + shipping
                 if total > 0 and total < lowest:
                     lowest = total
+                total_sold += int(item.get("unitSoldQuantity", 0) or 0)
 
             return {
                 "lowest_price": round(lowest, 2) if lowest != float("inf") else 0.0,
                 "count": total_entries,
+                "total_sold": total_sold,
             }
 
         except Exception as e:
             print(f"  ⚠️  競合価格取得エラー: {e}")
             return {"lowest_price": 0.0, "count": 0}
-
-    # ──────────────────────────────────────────────────────
-    # 直近30日の販売個数を取得（Finding API findCompletedItems）
-    # ──────────────────────────────────────────────────────
-    def get_sold_count_30d(self, jan_code: str, app_id: str, client_secret: str) -> int:
-        """
-        JANコードでeBayの直近30日間の販売個数（日本発送）を取得する
-        Marketplace Insights API (Beta) を使用
-        """
-        if not app_id or not client_secret or not jan_code:
-            return 0
-
-        from datetime import datetime, timedelta, timezone
-        sold_from = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-
-        try:
-            token = self._get_browse_token(app_id, client_secret)
-            if not token:
-                return 0
-
-            resp = requests.get(
-                "https://api.ebay.com/buy/marketplace_insights/v1_beta/item_sales/search",
-                headers={"Authorization": f"Bearer {token}"},
-                params={
-                    "q":      str(jan_code),
-                    "filter": f"itemLocationCountry:JP,soldDate:[{sold_from}..]",
-                    "limit":  "200",
-                },
-                timeout=10,
-            )
-            data = resp.json()
-            print(f"  📦 Insights RAW: {str(data)[:300]}")
-            return data.get("total", 0)
-
-        except Exception as e:
-            print(f"  ⚠️  販売数取得エラー: {e}")
-            return 0
 
     def _empty_result(self, item_id: str) -> dict:
         return {
