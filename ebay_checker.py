@@ -192,9 +192,9 @@ class EbayChecker:
     # ──────────────────────────────────────────────────────
     # 日本発送セラーの最安値を取得（Finding API）
     # ──────────────────────────────────────────────────────
-    def get_jp_lowest_price(self, title: str, app_id: str, exclude_item_id: str = "") -> dict:
+    def get_jp_lowest_price(self, jan_code: str, app_id: str, exclude_item_id: str = "") -> dict:
         """
-        eBay上の日本発送出品の最安値（送料込み）を取得する
+        JANコード（EAN）でeBay上の日本発送出品の最安値（送料込み）を取得する
 
         Returns:
             {
@@ -205,18 +205,19 @@ class EbayChecker:
         if not app_id:
             print(f"  ⚠️  EBAY_APP_ID未設定")
             return {"lowest_price": 0.0, "count": 0}
+        if not jan_code:
+            return {"lowest_price": 0.0, "count": 0}
 
-        keywords = " ".join(title.split()[:6])
-        print(f"  🔍 競合検索キーワード: [{keywords}]")
         try:
             resp = requests.get(
                 "https://svcs.ebay.com/services/search/FindingService/v1",
                 params={
-                    "OPERATION-NAME":        "findItemsAdvanced",
+                    "OPERATION-NAME":        "findItemsByProduct",
                     "SERVICE-VERSION":       "1.13.0",
                     "SECURITY-APPNAME":      app_id,
                     "RESPONSE-DATA-FORMAT":  "JSON",
-                    "keywords":              keywords,
+                    "productId.type":        "EAN",
+                    "productId.__value__":   str(jan_code),
                     "itemFilter(0).name":    "LocatedIn",
                     "itemFilter(0).value":   "JP",
                     "paginationInput.entriesPerPage": "10",
@@ -225,10 +226,7 @@ class EbayChecker:
                 timeout=10,
             )
             data = resp.json()
-            result = data.get("findItemsAdvancedResponse", [{}])[0]
-            ack = result.get("ack", [""])[0]
-            error_msg = result.get("errorMessage", [{}])[0].get("error", [{}])[0].get("message", [""])[0]
-            print(f"  🔍 Finding API ack={ack} error={error_msg or 'none'}")
+            result = data.get("findItemsByProductResponse", [{}])[0]
             items = result.get("searchResult", [{}])[0].get("item", [])
             total_entries = int(result.get("paginationOutput", [{}])[0].get("totalEntries", ["0"])[0])
 

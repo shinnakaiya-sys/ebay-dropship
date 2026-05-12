@@ -99,7 +99,7 @@ def main():
         # 3. 競合（日本発送）最安値を取得
         # ──────────────────────────────────────
         rival = ebay.get_jp_lowest_price(
-            ebay_data.get("title", product.get("商品名", "")),
+            product.get("JANコード", ""),
             CONFIG.get("EBAY_APP_ID", ""),
             exclude_item_id=ebay_id,
         )
