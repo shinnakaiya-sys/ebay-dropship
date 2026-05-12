@@ -23,9 +23,11 @@ class KeepaChecker:
                 timeout=10,
             )
             if resp.status_code == 200:
-                self.api.tokens_left = resp.json().get("tokensLeft", self.api.tokens_left)
-        except Exception:
-            pass
+                data = resp.json()
+                print(f"  🔑 Keepa /token レスポンス: {data}")
+                self.api.tokens_left = data.get("tokensLeft", self.api.tokens_left)
+        except Exception as e:
+            print(f"  ⚠️  Keepa /token 取得失敗: {e}")
         print(f"✅ Keepa接続（残りトークン: {self.api.tokens_left}）")
 
     @property
