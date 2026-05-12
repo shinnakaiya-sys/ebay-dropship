@@ -225,6 +225,7 @@ class EbayChecker:
                 timeout=10,
             )
             data = resp.json()
+            print(f"  🔍 RAW: {str(data)[:400]}")
             result = data.get("findItemsAdvancedResponse", [{}])[0]
             items = result.get("searchResult", [{}])[0].get("item", [])
             total_entries = int(result.get("paginationOutput", [{}])[0].get("totalEntries", ["0"])[0])
