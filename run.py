@@ -110,7 +110,7 @@ def main():
         else:
             print(f"  🏷️  競合なし or 取得不可")
 
-        sold_30d = ebay.get_sold_count_30d(product.get("JANコード", ""), CONFIG.get("EBAY_APP_ID", ""))
+        sold_30d = ebay.get_sold_count_30d(product.get("JANコード", ""), CONFIG.get("EBAY_APP_ID", ""), CONFIG.get("EBAY_CLIENT_SECRET", ""))
         sheets.update_sold_count(asin, sold_30d)
         print(f"  📦 30日販売数: {sold_30d}件")
         time.sleep(1)  # APIレートリミット対策

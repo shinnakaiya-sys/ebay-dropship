@@ -269,42 +269,34 @@ class EbayChecker:
     # ──────────────────────────────────────────────────────
     # 直近30日の販売個数を取得（Finding API findCompletedItems）
     # ──────────────────────────────────────────────────────
-    def get_sold_count_30d(self, jan_code: str, app_id: str) -> int:
+    def get_sold_count_30d(self, jan_code: str, app_id: str, client_secret: str) -> int:
         """
         JANコードでeBayの直近30日間の販売個数（日本発送）を取得する
+        Marketplace Insights API (Beta) を使用
         """
-        if not app_id or not jan_code:
+        if not app_id or not client_secret or not jan_code:
             return 0
 
         from datetime import datetime, timedelta, timezone
-        end_time_from = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        sold_from = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
         try:
+            token = self._get_browse_token(app_id, client_secret)
+            if not token:
+                return 0
+
             resp = requests.get(
-                "https://svcs.ebay.com/services/search/FindingService/v1",
+                "https://api.ebay.com/buy/marketplace_insights/v1_beta/item_sales/search",
+                headers={"Authorization": f"Bearer {token}"},
                 params={
-                    "OPERATION-NAME":          "findCompletedItems",
-                    "SERVICE-VERSION":         "1.13.0",
-                    "SECURITY-APPNAME":        app_id,
-                    "RESPONSE-DATA-FORMAT":    "JSON",
-                    "keywords":                str(jan_code),
-                    "itemFilter(0).name":      "LocatedIn",
-                    "itemFilter(0).value":     "JP",
-                    "itemFilter(1).name":      "SoldItemsOnly",
-                    "itemFilter(1).value":     "true",
-                    "itemFilter(2).name":      "EndTimeFrom",
-                    "itemFilter(2).value":     end_time_from,
-                    "paginationInput.entriesPerPage": "100",
+                    "q":      str(jan_code),
+                    "filter": f"itemLocationCountry:JP,soldDate:[{sold_from}..]",
+                    "limit":  "200",
                 },
                 timeout=10,
             )
             data = resp.json()
-            result = data.get("findCompletedItemsResponse", [{}])[0]
-            # エラーチェック
-            if result.get("ack", [""])[0] == "Failure":
-                return 0
-            total = int(result.get("paginationOutput", [{}])[0].get("totalEntries", ["0"])[0])
-            return total
+            return data.get("total", 0)
 
         except Exception as e:
             print(f"  ⚠️  販売数取得エラー: {e}")
