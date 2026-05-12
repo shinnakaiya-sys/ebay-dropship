@@ -46,7 +46,9 @@ def main():
     required = len(products) * MIN_TOKENS_CHECK
     if keepa.tokens_left < required:
         print(f"⚠️  Keepaトークン不足（残: {keepa.tokens_left} / 推奨: {required}）")
-        print("   トークン回復後に再実行してください（1トークン/秒で回復）")
+        print(f"   処理可能な商品数: {keepa.tokens_left // MIN_TOKENS_CHECK} 件 → 可能な分だけ処理します")
+    if keepa.tokens_left < MIN_TOKENS_CHECK:
+        print("   トークンが1件分もないため終了します")
         sheets.write_summary(len(products), [])
         return
 
@@ -61,7 +63,15 @@ def main():
             print(f"  ⚠️  仕入れ基準価格が未入力のためスキップ")
             continue
         base_price  = float(base_price_raw)
+        # 商品ごとの下限価格（空欄=グローバル設定を使用）
+        min_price_raw = product.get("下限価格(USD)", "")
+        product_min_price = float(min_price_raw) if str(min_price_raw).strip() else None
         print(f"\n[{i+1}/{len(products)}] {product['商品名'][:40]}...")
+
+        # トークン残量チェック（1商品分なければ中断）
+        if keepa.tokens_left < MIN_TOKENS_CHECK:
+            print(f"  ⚠️  Keepaトークン不足（残: {keepa.tokens_left}）→ 残り商品をスキップ")
+            break
 
         # ──────────────────────────────────────
         # 1. Keepa: Amazon価格・在庫チェック
@@ -105,7 +115,7 @@ def main():
 
         # ケース②: Amazon在庫復活 → eBay出品再開
         if amazon_in_stock and not ebay_active:
-            new_price = calc_sell_price(amazon_price, CONFIG)
+            new_price = calc_sell_price(amazon_price, CONFIG, min_price=product_min_price)
             ebay.relist(ebay_id, new_price)
             sheets.update_status(asin, "出品中")
             alerts.append({
@@ -120,7 +130,7 @@ def main():
 
         # ケース③: Amazon価格変動 → eBay価格更新
         if amazon_in_stock and ebay_active and price_changed:
-            new_price = calc_sell_price(amazon_price, CONFIG)
+            new_price = calc_sell_price(amazon_price, CONFIG, min_price=product_min_price)
             ebay.revise_price(ebay_id, new_price)
             sheets.update_price(asin, amazon_price, new_price)
             alerts.append({
@@ -153,7 +163,7 @@ def main():
 # ──────────────────────────────────────────────────────────
 # 売値計算（eBayドル建て）
 # ──────────────────────────────────────────────────────────
-def calc_sell_price(amazon_price_jpy, config, weight_kg: float = 1.0):
+def calc_sell_price(amazon_price_jpy, config, weight_kg: float = 1.0, min_price: float = None):
     """
     Amazon円価格 → eBayドル売値を計算（SpeedPAK実送料を使用）
 
@@ -169,6 +179,11 @@ def calc_sell_price(amazon_price_jpy, config, weight_kg: float = 1.0):
     shipping_usd = shipping_jpy / config["JPY_TO_USD"]
     usd = (product_usd + shipping_usd) / (1 - config["EBAY_FEE_RATE"])
     usd = usd / (1 - config["TARGET_MARGIN"])
+    # 商品個別の下限価格（指定なしはグローバル設定を使用）
+    floor = min_price if min_price is not None else config.get("MIN_SELL_PRICE_USD", 0)
+    if floor and usd < floor:
+        print(f"  ⚠️  計算売値 ${usd:.2f} < 下限 ${floor} → 下限価格を適用")
+        usd = floor
     return round(usd, 2)
 
 

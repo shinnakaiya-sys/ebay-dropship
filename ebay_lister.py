@@ -110,12 +110,15 @@ class EbayLister:
         # 画像URL（最大12枚）
         # 画像を最大12枚になるまで繰り返し挿入
         raw_images = [url for url in p.get("image_urls", []) if url]
+        print(f"  🖼️  取得画像数: {len(raw_images)}枚")
         if raw_images:
             # 12枚になるまで繰り返す
             import itertools
             images_12 = list(itertools.islice(itertools.cycle(raw_images), 12))
+            print(f"  🖼️  送信画像数（繰り返し後）: {len(images_12)}枚")
         else:
             images_12 = []
+            print(f"  ⚠️  画像なし（PictureDetailsをスキップ）")
         images_xml = "".join(f"<PictureURL>{url}</PictureURL>" for url in images_12)
 
         title    = self._escape_xml(p["title"][:80])
@@ -433,6 +436,38 @@ def build_listing_data(asin: str, keepa_data: dict, config: dict) -> dict:
         item_specifics["Manufacturer"] = manufacturer
     item_specifics["Country/Region of Manufacture"] = "Japan"
 
+    # Anthropic APIでItem Specificsを自動生成
+    try:
+        import requests as _req, json as _json
+        _prompt = (
+            f"You are an eBay listing expert. Generate Item Specifics for this product.\n"
+            f"Product: {title}\nBrand: {brand or 'N/A'}\nModel: {mpn or 'N/A'}\n"
+            f"Generate ONLY a JSON object with relevant eBay Item Specifics.\n"
+            f"Include: Type, Color, Material, Size, Features, Theme, Age Group etc.\n"
+            f"Max 12 fields. No markdown. Example: {{\"Type\": \"Figure\", \"Color\": \"Multi-Color\"}}"
+        )
+        _resp = _req.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "Content-Type": "application/json",
+                "x-api-key": config.get("ANTHROPIC_API_KEY", ""),
+                "anthropic-version": "2023-06-01",
+            },
+            json={"model": "claude-haiku-4-5-20251001", "max_tokens": 400,
+                  "messages": [{"role": "user", "content": _prompt}]},
+            timeout=15,
+        )
+        _data = _resp.json()
+        if _data.get("content"):
+            _text = _data["content"][0]["text"].strip().replace("```json", "").replace("```", "").strip()
+            _ai = _json.loads(_text)
+            for k, v in _ai.items():
+                if k not in item_specifics and v and str(v).lower() not in ("n/a", "unknown", ""):
+                    item_specifics[k] = str(v)[:65]
+            print(f"  🏷️  Item Specifics: {len(item_specifics)}項目生成")
+    except Exception as _e:
+        print(f"  ⚠️  Item Specifics生成失敗: {_e}")
+
     # タイトルからeBayの最適カテゴリを自動取得
     # JANコード（EAN）を優先してカテゴリを自動取得
     jan_code    = keepa_data.get("upc", "") or ""
@@ -484,7 +519,6 @@ Product Info:
 - Model: {model}
 - Amazon JP Rating: {rating}/5 ({reviews} reviews)
 - Features (Japanese): {chr(10).join(jp_feats[:5]) if jp_feats else "N/A"}
-- Price in JPY: ¥{amazon_price_jpy:,.0f}
 
 Create HTML description with these sections:
 1. Brief compelling intro (1-2 sentences with keywords)
@@ -596,6 +630,7 @@ def fetch_listing_details(keepa_api, asin: str) -> dict:
                 image_urls.append(
                     f"https://images-na.ssl-images-amazon.com/images/I/{img_id_encoded}"
                 )
+        print(f"  🖼️  Keepa画像数: {len(images)}枚 → URL生成: {len(image_urls)}枚")
 
         # 商品特徴
         features = p.get("features", []) or []
