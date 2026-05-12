@@ -296,6 +296,7 @@ class EbayChecker:
                 timeout=10,
             )
             data = resp.json()
+            print(f"  📦 Insights RAW: {str(data)[:300]}")
             return data.get("total", 0)
 
         except Exception as e:
