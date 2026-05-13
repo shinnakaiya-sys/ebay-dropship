@@ -4,9 +4,26 @@
 """
 
 import os
+import requests
 from dotenv import load_dotenv
 
 load_dotenv()
+
+
+def _fetch_jpy_rate(fallback: float = 155.0) -> float:
+    """Frankfurter API（無料・認証不要）から USD/JPY レートを取得する"""
+    try:
+        resp = requests.get(
+            "https://api.frankfurter.app/latest",
+            params={"from": "USD", "to": "JPY"},
+            timeout=5,
+        )
+        rate = resp.json()["rates"]["JPY"]
+        print(f"💱 USD/JPY 為替レート取得: {rate}")
+        return float(rate)
+    except Exception as e:
+        print(f"⚠️  為替レート取得失敗（フォールバック {fallback} を使用）: {e}")
+        return fallback
 
 CONFIG = {
     # ── API認証情報 ──────────────────────────────
@@ -25,7 +42,7 @@ CONFIG = {
     "GSHEET_CRED_PATH": os.getenv("GSHEET_CRED_PATH", "credentials.json"),
 
     # ── 価格・通貨設定 ───────────────────────────
-    "JPY_TO_USD":       155.0,    # 為替レート（定期的に更新推奨）
+    "JPY_TO_USD":       _fetch_jpy_rate(fallback=155.0),  # 起動時に自動取得
     "EBAY_FEE_RATE":    0.17,     # eBay手数料 17%
     "TARIFF_RATE":      0.15,     # 関税 15%
     "TARGET_MARGIN":    0.01,     # 目標利益率 1%

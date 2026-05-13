@@ -95,6 +95,13 @@ def main():
         # Sheetsに記録
         sheets.log_price(asin, "ebay", ebay_price, ebay_active)
 
+        # 計算売値・eBay価格ズレを事前算出
+        new_price = calc_sell_price(amazon_price, CONFIG, min_price=product_min_price)
+        ebay_price_stale = (
+            ebay_price > 0
+            and abs(ebay_price - new_price) / new_price > CONFIG["PRICE_CHANGE_THRESHOLD"]
+        )
+
         # ──────────────────────────────────────
         # 3. 競合（日本発送）最安値を取得
         # ──────────────────────────────────────
@@ -144,22 +151,21 @@ def main():
             print(f"  ✅ 在庫復活 → eBay再出品")
             continue
 
-        # ケース③: Amazon価格変動 → eBay価格更新
-        if amazon_in_stock and ebay_active and price_changed:
-            new_price = calc_sell_price(amazon_price, CONFIG, min_price=product_min_price)
+        # ケース③: Amazon価格変動 or eBay価格ズレ → eBay価格更新
+        if amazon_in_stock and ebay_active and (price_changed or ebay_price_stale):
             ebay.revise_price(ebay_id, new_price)
             sheets.update_price(asin, amazon_price, new_price)
+            reason = "Amazon価格変動" if price_changed else f"eBay価格ズレ(${ebay_price}→${new_price})"
             alerts.append({
                 "type": "💰 価格変動",
                 "asin": asin,
                 "ebay_id": ebay_id,
-                "message": f"Amazon: ¥{amazon_price} → eBay更新: ${new_price}",
+                "message": f"{reason} → eBay更新: ${new_price}",
                 "product": product["商品名"][:40],
             })
-            print(f"  💰 価格変動 → eBay価格更新 (¥{amazon_price})")
+            print(f"  💰 {reason} → eBay価格更新")
             continue
 
-        new_price = calc_sell_price(amazon_price, CONFIG, min_price=product_min_price)
         sheets.update_price(asin, amazon_price, new_price)
         print(f"  ✔  変動なし（Amazon: ¥{amazon_price} / 在庫: {'あり' if amazon_in_stock else 'なし'}）")
         time.sleep(0.5)  # API制限対策
