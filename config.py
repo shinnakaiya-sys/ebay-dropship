@@ -16,7 +16,7 @@ def _fetch_jpy_rate(fallback: float = 155.0) -> float:
         resp = requests.get(
             "https://api.frankfurter.app/latest",
             params={"from": "USD", "to": "JPY"},
-            timeout=5,
+            timeout=3,
         )
         rate = resp.json()["rates"]["JPY"]
         print(f"💱 USD/JPY 為替レート取得: {rate}")
