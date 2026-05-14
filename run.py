@@ -18,6 +18,9 @@ Amazon.co.jp（Keepa）× eBay × Google Sheets
   # または GitHub Actions / cron で毎日自動実行
 """
 
+import os
+os.environ["TQDM_DISABLE"] = "1"  # tqdmを完全無効化（VS Code対応）
+
 import time
 from datetime import datetime
 from config import CONFIG
@@ -78,6 +81,10 @@ def main():
         # ──────────────────────────────────────
         keepa_data = keepa.check(asin)
 
+        if keepa_data.get("error"):
+            print(f"  ⚠️  Keepaエラーのためスキップ（在庫状態を変更しません）")
+            continue
+
         amazon_price    = keepa_data["current_price"]
         amazon_in_stock = keepa_data["in_stock"]
         price_changed   = abs(amazon_price - base_price) / base_price > CONFIG["PRICE_CHANGE_THRESHOLD"]
@@ -101,7 +108,6 @@ def main():
             ebay_price > 0
             and abs(ebay_price - new_price) / new_price > CONFIG["PRICE_CHANGE_THRESHOLD"]
         )
-
         # ──────────────────────────────────────
         # 3. 競合（日本発送）最安値を取得
         # ──────────────────────────────────────

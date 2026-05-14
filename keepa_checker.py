@@ -181,4 +181,5 @@ class KeepaChecker:
             "lowest_fba": 0,
             "rating": 0,
             "review_count": 0,
+            "error": True,
         }
