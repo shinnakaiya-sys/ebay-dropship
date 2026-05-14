@@ -19,7 +19,11 @@ Amazon.co.jp（Keepa）× eBay × Google Sheets
 """
 
 import os
-os.environ["TQDM_DISABLE"] = "1"  # tqdmを完全無効化（VS Code対応）
+import sys
+
+# tqdmを完全無効化してANSIカラーをリセット（VS Code対応）
+os.environ["TQDM_DISABLE"] = "1"
+sys.stdout.reconfigure(line_buffering=True)
 
 import time
 from datetime import datetime
@@ -28,6 +32,9 @@ from keepa_checker import KeepaChecker
 from ebay_checker import EbayChecker
 from sheets_manager import SheetsManager
 from notifier import Notifier
+
+# keepaインポート後にANSIカラーをリセット
+print("\033[0m", end="", flush=True)
 
 
 def main():

@@ -66,6 +66,7 @@ class KeepaChecker:
                     wait=True,
                     progress_bar=False,
                 )
+                import sys; print("\033[0m", end="", flush=True)  # ANSIリセット
                 break
             except Exception as e:
                 if attempt < 2 and "timed out" in str(e).lower():
