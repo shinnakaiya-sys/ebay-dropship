@@ -33,8 +33,6 @@ from ebay_checker import EbayChecker
 from sheets_manager import SheetsManager
 from notifier import Notifier
 
-# keepaインポート後にANSIカラーをリセット
-print("\033[0m", end="", flush=True)
 
 
 def main():
