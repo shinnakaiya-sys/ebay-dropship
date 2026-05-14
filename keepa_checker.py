@@ -64,6 +64,7 @@ class KeepaChecker:
                     offers=20,         # 最小値20
                     stock=True,
                     wait=True,
+                    progress_bar=False,
                 )
                 break
             except Exception as e:
