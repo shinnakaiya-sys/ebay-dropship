@@ -2,6 +2,25 @@
 Keepa APIで Amazon.co.jp の価格・在庫を確認するモジュール
 """
 
+# keepaインポート前にtqdmをno-opに差し替え（VS Codeターミナル文字化け防止）
+import tqdm as _tqdm
+import tqdm.auto as _tqdm_auto
+
+class _NoTqdm:
+    def __init__(self, iterable=None, *a, **kw):
+        self._it = iterable
+    def __iter__(self):
+        return iter(self._it) if self._it is not None else iter([])
+    def __enter__(self): return self
+    def __exit__(self, *a): pass
+    def update(self, *a, **kw): pass
+    def close(self): pass
+    def set_description(self, *a, **kw): pass
+    def set_postfix(self, *a, **kw): pass
+
+_tqdm.tqdm = _NoTqdm
+_tqdm_auto.tqdm = _NoTqdm
+
 import keepa
 import time
 
