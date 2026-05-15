@@ -113,13 +113,17 @@ class KeepaChecker:
             # 新品最安値（サードパーティ含む）csv[1]
             new_min_price = self._get_latest_price(csv, index=1)
 
-            # カート価格 → Amazon直販 → 新品最安値 の優先順
+            # カート価格 → Amazon直販 → 新品最安値 の優先順（表示・計算用）
             best_price = new_min_price or amazon_price or 0
 
-            # 在庫判定
-            in_stock = best_price > 0
+            # 在庫判定: 最新エントリが正の値かどうかで判断（-1=在庫切れ）
+            in_stock = (
+                self._is_currently_in_stock(csv, 18) or  # Buy Box
+                self._is_currently_in_stock(csv, 0)  or  # Amazon直販
+                self._is_currently_in_stock(csv, 1)       # 新品最安値
+            )
 
-            print(f"    Buy Box: {buy_box_price}円 / Amazon直販: {amazon_price}円 / 新品最安値: {new_min_price}円")
+            print(f"    Buy Box: {buy_box_price}円 / Amazon直販: {amazon_price}円 / 新品最安値: {new_min_price}円 / 在庫: {'あり' if in_stock else 'なし'}")
 
             return {
                 "asin":          asin,
@@ -147,6 +151,19 @@ class KeepaChecker:
             return prices[-1] if prices else 0
         except Exception:
             return 0
+
+    def _is_currently_in_stock(self, csv: list, index: int) -> bool:
+        """最新のCSVエントリが正の値（在庫あり）かチェック。-1は在庫切れ"""
+        try:
+            series = csv[index] if len(csv) > index else None
+            if not series:
+                return False
+            # 価格部分（奇数インデックス）の最後の値（-1含む）
+            values = series[1::2]
+            last = values[-1] if values else None
+            return last is not None and last > 0
+        except Exception:
+            return False
 
 
     def jan_to_asin(self, jan_code: str) -> str:

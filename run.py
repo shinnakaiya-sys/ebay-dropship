@@ -100,9 +100,13 @@ def main():
         # ──────────────────────────────────────
         # 2. eBay: 現在の出品状態チェック
         # ──────────────────────────────────────
-        ebay_data      = ebay.check(ebay_id)
-        ebay_price     = ebay_data["current_price"]
-        ebay_active    = ebay_data["is_active"]
+        ebay_data           = ebay.check(ebay_id)
+        ebay_price          = ebay_data["current_price"]
+        ebay_active         = ebay_data["is_active"]
+        ebay_qty            = ebay_data["quantity"]
+        ebay_listing_status = ebay_data["listing_status"]
+        # 購入者から見て有効な出品 = Active かつ 在庫数 > 0
+        ebay_available      = ebay_active and ebay_qty > 0
 
         # Sheetsに記録
         sheets.log_price(asin, "ebay", ebay_price, ebay_active)
@@ -133,10 +137,10 @@ def main():
         # 4. 判定ロジック
         # ──────────────────────────────────────
 
-        # ケース①: Amazon在庫切れ → eBay出品停止
-        if not amazon_in_stock and ebay_active:
+        # ケース①: Amazon在庫切れ → eBay出品停止（既に在庫0なら何もしない）
+        if not amazon_in_stock and ebay_available:
             ebay.end_listing(ebay_id)
-            sheets.update_status(asin, "在庫切れ（在庫0）")
+            sheets.update_status(asin, "在庫切れ停止")
             alerts.append({
                 "type": "⛔ 在庫切れ",
                 "asin": asin,
@@ -147,23 +151,29 @@ def main():
             print(f"  ⛔ 在庫切れ → eBay在庫数0に更新")
             continue
 
-        # ケース②: Amazon在庫復活 → eBay出品再開
-        if amazon_in_stock and not ebay_active:
+        if not amazon_in_stock and not ebay_available:
+            # 既に在庫0停止済み → シートステータスだけ合わせる
+            sheets.update_status(asin, "在庫切れ停止")
+            print(f"  ⛔ 在庫切れ（既に停止済み）")
+            continue
+
+        # ケース②: Amazon在庫あり かつ eBayが非表示（Active+在庫0）または終了済み
+        if amazon_in_stock and not ebay_available:
             new_price = calc_sell_price(amazon_price, CONFIG, min_price=product_min_price)
-            ebay.relist(ebay_id, new_price)
+            ebay.restore_listing(ebay_id, ebay_listing_status, new_price)
             sheets.update_status(asin, "出品中")
             alerts.append({
                 "type": "✅ 在庫復活",
                 "asin": asin,
                 "ebay_id": ebay_id,
-                "message": f"在庫復活 → eBay再出品 ¥{new_price}",
+                "message": f"在庫復活 → eBay復活 ${new_price}",
                 "product": product["商品名"][:40],
             })
-            print(f"  ✅ 在庫復活 → eBay再出品")
+            print(f"  ✅ 在庫復活 → eBay出品復活（{ebay_listing_status}）")
             continue
 
         # ケース③: Amazon価格変動 or eBay価格ズレ → eBay価格更新
-        if amazon_in_stock and ebay_active and (price_changed or ebay_price_stale):
+        if amazon_in_stock and ebay_available and (price_changed or ebay_price_stale):
             ebay.revise_price(ebay_id, new_price)
             sheets.update_price(asin, amazon_price, new_price)
             reason = "Amazon価格変動" if price_changed else f"eBay価格ズレ(${ebay_price}→${new_price})"

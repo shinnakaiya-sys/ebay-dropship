@@ -72,11 +72,12 @@ class EbayChecker:
             title = item.findtext("e:Title", namespaces=ns) or ""
 
             return {
-                "item_id":       item_id,
-                "current_price": float(price_str),
-                "is_active":     listing_status == "Active",
-                "quantity":      quantity,
-                "title":         title,
+                "item_id":        item_id,
+                "current_price":  float(price_str),
+                "is_active":      listing_status == "Active",
+                "listing_status": listing_status,
+                "quantity":       quantity,
+                "title":          title,
             }
 
         except Exception as e:
@@ -264,11 +265,52 @@ class EbayChecker:
             print(f"  ⚠️  競合価格取得エラー: {e}")
             return {"lowest_price": 0.0, "count": 0}
 
+    # ──────────────────────────────────────────────────────
+    # 在庫復活（Active+在庫0 → ReviseItem、Ended → RelistItem）
+    # ──────────────────────────────────────────────────────
+    def restore_listing(self, item_id: str, listing_status: str, new_price_usd: float) -> bool:
+        """
+        eBay出品を復活させる
+        - Active（在庫0で非表示）→ ReviseItem で数量1・価格更新
+        - Ended（終了済み）       → RelistItem で再出品
+        """
+        if listing_status == "Active":
+            # 在庫0のまま非表示になっているケース → 数量と価格を更新
+            xml_body = (
+                "<?xml version=" + chr(34) + "1.0" + chr(34) + " encoding=" + chr(34) + "utf-8" + chr(34) + "?>"
+                "<ReviseItemRequest xmlns=" + chr(34) + "urn:ebay:apis:eBLBaseComponents" + chr(34) + ">"
+                "<RequesterCredentials>"
+                "<eBayAuthToken>" + self.token + "</eBayAuthToken>"
+                "</RequesterCredentials>"
+                "<Item>"
+                "<ItemID>" + str(item_id) + "</ItemID>"
+                "<Quantity>1</Quantity>"
+                "<StartPrice>" + str(new_price_usd) + "</StartPrice>"
+                "</Item>"
+                "</ReviseItemRequest>"
+            )
+            return self._call_api("ReviseItem", xml_body, item_id, "在庫復活（Active→数量1）")
+        else:
+            # Ended等 → 再出品
+            xml_body = f"""<?xml version="1.0" encoding="utf-8"?>
+<RelistItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials>
+    <eBayAuthToken>{self.token}</eBayAuthToken>
+  </RequesterCredentials>
+  <Item>
+    <ItemID>{item_id}</ItemID>
+    <StartPrice>{new_price_usd}</StartPrice>
+    <Quantity>1</Quantity>
+  </Item>
+</RelistItemRequest>"""
+            return self._call_api("RelistItem", xml_body, item_id, "再出品（Ended→Relist）")
+
     def _empty_result(self, item_id: str) -> dict:
         return {
-            "item_id": item_id,
-            "current_price": 0,
-            "is_active": False,
-            "quantity": 0,
-            "title": "",
+            "item_id":        item_id,
+            "current_price":  0,
+            "is_active":      False,
+            "listing_status": "",
+            "quantity":       0,
+            "title":          "",
         }
