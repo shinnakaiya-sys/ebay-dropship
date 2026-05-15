@@ -133,8 +133,11 @@ LISTING_DURATION = "GTC"  # GTC = Good Till Cancelled（無期限）
 
 
 class EbayLister:
-    def __init__(self, token: str):
+    def __init__(self, token: str, oauth_token: str = ""):
         self.token = token
+        # Marketing API用OAuth2トークン（sell.marketingスコープ必須）
+        # Trading APIのIAFトークンとは別物。未設定時はPromoted Listingをスキップ。
+        self.oauth_token = oauth_token or CONFIG.get("EBAY_OAUTH_TOKEN", "")
         self.headers = {
             "X-EBAY-API-SITEID":              "0",    # 0=US
             "X-EBAY-API-COMPATIBILITY-LEVEL": "967",
@@ -150,27 +153,41 @@ class EbayLister:
         """Default campaignのIDを取得してキャッシュ"""
         if self._campaign_id:
             return self._campaign_id
+        if not self.oauth_token:
+            print(
+                "  ℹ️  Promoted Listing: EBAY_OAUTH_TOKEN未設定のためスキップ\n"
+                "     → eBay Developer Portal で sell.marketing スコープ付きトークンを発行し\n"
+                "       .env に EBAY_OAUTH_TOKEN=<token> を追加してください"
+            )
+            return ""
         try:
             resp = requests.get(
                 "https://api.ebay.com/sell/marketing/v1/ad_campaign",
                 headers={
-                    "Authorization": f"Bearer {self.token}",
+                    "Authorization": f"Bearer {self.oauth_token}",
                     "Content-Type":  "application/json",
                 },
                 timeout=15,
             )
             if resp.status_code == 200:
-                for camp in resp.json().get("campaigns", []):
+                campaigns = resp.json().get("campaigns", [])
+                for camp in campaigns:
                     if camp.get("campaignName") == "Default campaign":
                         self._campaign_id = camp.get("campaignId", "")
                         print(f"  📢 Default campaign取得: {self._campaign_id}")
                         return self._campaign_id
                 # 名前で見つからない場合は最初のRUNNINGキャンペーンを使用
-                for camp in resp.json().get("campaigns", []):
+                for camp in campaigns:
                     if camp.get("campaignStatus") == "RUNNING":
                         self._campaign_id = camp.get("campaignId", "")
                         print(f"  ℹ️  'Default campaign'未発見 → '{camp.get('campaignName')}'を使用")
                         return self._campaign_id
+                print(f"  ⚠️  RUNNINGキャンペーンが見つかりません（eBay Seller Hub で確認してください）")
+            elif resp.status_code == 403:
+                print(
+                    "  ⚠️  Marketing API 403: EBAY_OAUTH_TOKEN に sell.marketing スコープが不足しています\n"
+                    "     → eBay Developer Portal でトークンを再発行してください"
+                )
             else:
                 print(f"  ⚠️  キャンペーン一覧取得失敗: {resp.status_code}")
         except Exception as e:
@@ -181,13 +198,12 @@ class EbayLister:
         """出品済み商品をPromoted Listings General（Default campaign）に追加"""
         campaign_id = self._get_default_campaign_id()
         if not campaign_id:
-            print(f"  ⚠️  Promoted Listing: キャンペーンIDが取得できませんでした")
             return False
         try:
             resp = requests.post(
                 f"https://api.ebay.com/sell/marketing/v1/ad_campaign/{campaign_id}/bulk_create_ads_by_listing_id",
                 headers={
-                    "Authorization": f"Bearer {self.token}",
+                    "Authorization": f"Bearer {self.oauth_token}",
                     "Content-Type":  "application/json",
                 },
                 json={

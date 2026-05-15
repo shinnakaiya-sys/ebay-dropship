@@ -31,6 +31,7 @@ jobs:
         run: |
           echo "KEEPA_API_KEY=${{ secrets.KEEPA_API_KEY }}" >> .env
           echo "EBAY_TOKEN=${{ secrets.EBAY_TOKEN }}" >> .env
+          echo "EBAY_OAUTH_TOKEN=${{ secrets.EBAY_OAUTH_TOKEN }}" >> .env
           echo "ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}" >> .env
           echo "SHEET_ID=${{ secrets.SHEET_ID }}" >> .env
           echo "SLACK_WEBHOOK=${{ secrets.SLACK_WEBHOOK }}" >> .env
