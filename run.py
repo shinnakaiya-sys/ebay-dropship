@@ -45,7 +45,7 @@ def main():
 
     # 設定シートから利益率などを上書き
     _settings = sheets.get_settings()
-    _OVERRIDABLE = ["TARGET_MARGIN", "EBAY_FEE_RATE", "MIN_SELL_PRICE_USD", "PRICE_CHANGE_THRESHOLD"]
+    _OVERRIDABLE = ["TARGET_MARGIN", "EBAY_FEE_RATE", "TARIFF_RATE", "MIN_SELL_PRICE_USD", "PRICE_CHANGE_THRESHOLD"]
     for _key in _OVERRIDABLE:
         if _key in _settings:
             CONFIG[_key] = _settings[_key]

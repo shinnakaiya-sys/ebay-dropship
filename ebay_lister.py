@@ -101,6 +101,14 @@ _AI_CATEGORY_HINTS = [
     # ─── Cameras ───
     ("Digital Cameras (mirrorless, compact, point-and-shoot)", 31388),
     ("Digital Camera Parts & Accessories", 64352),
+    # ─── Video Games ───
+    ("Video Game Consoles (Nintendo Switch, PlayStation, Xbox console hardware)", 139971),
+    ("Video Games (game software, cartridge, disc)", 139973),
+    ("Video Game Controllers & Attachments (gamepad, Joy-Con, controller)", 117042),
+    ("Video Game Accessory Bundles", 171826),
+    ("Video Game Bags, Cases & Travel Cases", 171831),
+    ("Video Game Cables & Adapters", 171814),
+    ("Video Game Chargers & Charging Docks", 171858),
     # ─── Tools ───
     ("Hand Tools (wrenches, sockets, pliers)", 3469),
     ("Power Tools", 122668),
@@ -505,7 +513,13 @@ def get_best_category(token: str, title: str, jan_code: str = "", config: dict =
             )
             data = resp.json()
             if data.get("content"):
-                ai_cat_id = int(data["content"][0]["text"].strip())
+                import re as _re
+                _raw = data["content"][0]["text"].strip()
+                _m = _re.search(r'\b(\d{4,6})\b', _raw)
+                if not _m:
+                    print(f"  ⚠️  AI返却値から数値を抽出できません: {_raw[:60]}")
+                    raise ValueError("no numeric category id found")
+                ai_cat_id = int(_m.group(1))
                 # リストにあるIDかつ葉カテゴリであることを確認
                 if ai_cat_id in valid_ids and is_leaf_category(ai_cat_id):
                     info = EBAY_CATEGORY_DB.get(ai_cat_id, {})
@@ -916,7 +930,7 @@ def main():
 
     # 設定シートから利益率などを上書き
     _settings = sheets.get_settings()
-    _OVERRIDABLE = ["TARGET_MARGIN", "EBAY_FEE_RATE", "MIN_SELL_PRICE_USD", "PRICE_CHANGE_THRESHOLD"]
+    _OVERRIDABLE = ["TARGET_MARGIN", "EBAY_FEE_RATE", "TARIFF_RATE", "MIN_SELL_PRICE_USD", "PRICE_CHANGE_THRESHOLD"]
     for _key in _OVERRIDABLE:
         if _key in _settings:
             CONFIG[_key] = _settings[_key]

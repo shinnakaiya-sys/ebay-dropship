@@ -37,6 +37,7 @@ SHEET_SETTINGS  = "設定"
 DEFAULT_SETTINGS = [
     ["TARGET_MARGIN",           "0.01",  "目標利益率（例: 0.05 = 5%）"],
     ["EBAY_FEE_RATE",           "0.17",  "eBay手数料率（例: 0.17 = 17%）"],
+    ["TARIFF_RATE",             "0.15",  "関税率（例: 0.15 = 15%）"],
     ["MIN_SELL_PRICE_USD",      "20.0",  "最低販売価格（USD）"],
     ["PRICE_CHANGE_THRESHOLD",  "0.01",  "価格変動通知閾値（例: 0.05 = 5%以上で通知）"],
 ]
