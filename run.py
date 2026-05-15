@@ -85,6 +85,16 @@ def main():
         # 商品ごとの下限価格（空欄=グローバル設定を使用）
         min_price_raw = product.get("下限価格(USD)", "")
         product_min_price = float(min_price_raw) if str(min_price_raw).strip() else None
+
+        # 商品ごとの利益率（空欄=設定シートのグローバル値を使用）
+        margin_raw = product.get("利益率", "")
+        product_config = CONFIG.copy()
+        if str(margin_raw).strip():
+            try:
+                product_config["TARGET_MARGIN"] = float(str(margin_raw).strip())
+                print(f"  📊 利益率: {product_config['TARGET_MARGIN']*100:.1f}%（商品個別設定）")
+            except ValueError:
+                pass
         print(f"\n[{i+1}/{len(products)}] {product['商品名'][:40]}...")
 
         # トークン残量チェック（1商品分なければ中断）
@@ -123,7 +133,7 @@ def main():
         sheets.log_price(asin, "ebay", ebay_price, ebay_active)
 
         # 計算売値・eBay価格ズレを事前算出
-        new_price = calc_sell_price(amazon_price, CONFIG, min_price=product_min_price)
+        new_price = calc_sell_price(amazon_price, product_config, min_price=product_min_price)
         ebay_price_stale = (
             ebay_price > 0
             and abs(ebay_price - new_price) / new_price > CONFIG["PRICE_CHANGE_THRESHOLD"]
@@ -170,7 +180,7 @@ def main():
 
         # ケース②: Amazon在庫あり かつ eBayが非表示（Active+在庫0）または終了済み
         if amazon_in_stock and not ebay_available:
-            new_price = calc_sell_price(amazon_price, CONFIG, min_price=product_min_price)
+            new_price = calc_sell_price(amazon_price, product_config, min_price=product_min_price)
             ebay.restore_listing(ebay_id, ebay_listing_status, new_price)
             sheets.update_status(asin, "出品中")
             alerts.append({
