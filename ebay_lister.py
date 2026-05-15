@@ -13,6 +13,8 @@ eBay 自動出品モジュール
   python ebay_lister.py --asin BXXXXXXX  # 1件だけ出品（テスト用）
 """
 
+import csv as _csv
+import os as _os
 import time
 import argparse
 import requests
@@ -21,6 +23,93 @@ from datetime import datetime, timedelta
 from config import CONFIG
 from keepa_checker import KeepaChecker
 from sheets_manager import SheetsManager
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# eBayカテゴリCSV読み込み（葉カテゴリ検証・AI推薦用）
+# ──────────────────────────────────────────────────────────────────────────
+
+def _load_ebay_category_db() -> dict:
+    """ebay_categories.csvを読み込んでカテゴリ辞書を構築"""
+    csv_path = _os.path.join(_os.path.dirname(__file__), "ebay_categories.csv")
+    cat_map = {}
+    if not _os.path.exists(csv_path):
+        return cat_map
+    try:
+        with open(csv_path, encoding="utf-8") as f:
+            reader = _csv.DictReader(f)
+            for row in reader:
+                try:
+                    cat_id = int(row["CategoryID"])
+                    is_leaf = row.get("LeafCategory", "") == "TRUE"
+                    path_parts = []
+                    for i in range(1, 8):
+                        n = row.get(f"L{i}_name", "").replace("&amp;", "&").strip()
+                        if n:
+                            path_parts.append(n)
+                    cat_map[cat_id] = {
+                        "name": row["CategoryName"].replace("&amp;", "&"),
+                        "is_leaf": is_leaf,
+                        "path": " > ".join(path_parts),
+                    }
+                except (ValueError, KeyError):
+                    continue
+    except Exception as e:
+        print(f"  ⚠️  カテゴリCSV読み込み失敗: {e}")
+    return cat_map
+
+EBAY_CATEGORY_DB = _load_ebay_category_db()
+
+
+def is_leaf_category(cat_id: int) -> bool:
+    """カテゴリIDが葉カテゴリかどうかをCSVで確認（CSVにない場合はTrueを返す）"""
+    info = EBAY_CATEGORY_DB.get(cat_id)
+    if info is None:
+        return True  # 不明な場合は通す
+    return info["is_leaf"]
+
+
+# AIフォールバック用の葉カテゴリ候補（CSVから選定）
+_AI_CATEGORY_HINTS = [
+    # ─── Toys & Hobbies ───
+    ("Action Figures (anime, SH Figuarts, statues, character figures)", 261068),
+    ("Action Figures Playsets (figure set with accessories)", 261069),
+    ("Model Kits - Figures (Gundam, 30MS, mecha, character model kits)", 262324),
+    ("Model Kits - Automotive (car, motorcycle model kits)", 262320),
+    ("Model Kits - Aircraft (plane model kits)", 262319),
+    ("Model Kits - Boats & Ships", 262321),
+    ("Other Models & Kits (Bandai, Tamiya snap kits)", 262335),
+    ("RC Cars, Trucks & Motorcycles (complete RC vehicle)", 182183),
+    ("RC Wheels, Tires, Rims & Hubs (RC spare parts)", 182201),
+    ("RC Suspension & Steering Parts (RC spare parts)", 182199),
+    ("Dolls & Doll Playsets (Licca-chan, fashion dolls, Barbie-type)", 262346),
+    ("Dollhouse Dolls & Animals (Sylvanian Families, Calico Critters, miniature animal families)", 86823),
+    ("CCG Sealed Boxes (sealed card game booster box)", 261044),
+    ("CCG Sealed Packs (individual card packs)", 183456),
+    ("CCG Sealed Decks & Kits (starter deck)", 183457),
+    ("Other Preschool & Pretend Play (Pretty Cure, character toys for young children)", 19181),
+    # ─── Health & Beauty ───
+    ("Men's Razors (safety razor, double edge razor, manual razor)", 47921),
+    ("Men's Razor Blades (blade cartridge refills)", 47931),
+    ("Women's Razors", 178964),
+    ("Shaving & Grooming Kits & Sets (razor + stand set)", 106315),
+    ("Shaving Brushes & Mugs", 168191),
+    # ─── Kitchen / Home ───
+    ("Cling Film, Foil & Food Wraps (onigiri film, plastic wrap, aluminum foil)", 179206),
+    ("Food Storage Containers (lunch box, bento box)", 20655),
+    ("Food Storage Bags", 20653),
+    # ─── Cameras ───
+    ("Digital Cameras (mirrorless, compact, point-and-shoot)", 31388),
+    ("Digital Camera Parts & Accessories", 64352),
+    # ─── Tools ───
+    ("Hand Tools (wrenches, sockets, pliers)", 3469),
+    ("Power Tools", 122668),
+    # ─── Other ───
+    ("Sporting Goods", 888),
+    ("Books", 267),
+    ("Musical Instruments", 619),
+    ("Pet Supplies", 1281),
+]
 
 
 EBAY_API_URL = "https://api.ebay.com/ws/api.dll"
@@ -233,16 +322,15 @@ class EbayLister:
 # eBayタイトルから最適カテゴリIDを自動取得
 # ──────────────────────────────────────────────────────────
 
-def get_best_category(token: str, title: str, jan_code: str = "") -> int:
+def get_best_category(token: str, title: str, jan_code: str = "", config: dict = None) -> int:
     """
-    JANコード（EAN）優先でeBayの最適カテゴリIDを自動取得
+    タイトル優先でeBayの最適葉カテゴリIDを自動取得
 
     優先順位:
-    1. JANコード → FindProducts API（最高精度・商品DB直接マッチ）
-    2. タイトル  → GetSuggestedCategories API（フォールバック）
+    1. タイトル → GetSuggestedCategories API（LeafCategoryのみ・CSVで検証）
+    2. Anthropic AI → CSVの葉カテゴリ候補から選択
+    3. デフォルトカテゴリ
     """
-    import xml.etree.ElementTree as ET
-
     base_headers = {
         "X-EBAY-API-SITEID":              "0",
         "X-EBAY-API-COMPATIBILITY-LEVEL": "967",
@@ -250,63 +338,18 @@ def get_best_category(token: str, title: str, jan_code: str = "") -> int:
         "Content-Type":                   "text/xml",
     }
 
-    # Step 1: JANコード（EAN）をGetSuggestedCategoriesのクエリとして使用
-    # JANコードは数字のみのため特殊文字エスケープ不要で最も安全
-    if jan_code and jan_code not in ("Does not apply", ""):
+    def _call_suggested(query: str) -> int:
+        """GetSuggestedCategoriesで葉カテゴリのみ取得（0=失敗）"""
+        query_safe = query.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         xml_body = (
             "<?xml version=" + chr(34) + "1.0" + chr(34) + " encoding=" + chr(34) + "utf-8" + chr(34) + "?>"
             "<GetSuggestedCategoriesRequest xmlns=" + chr(34) + "urn:ebay:apis:eBLBaseComponents" + chr(34) + ">"
             "<RequesterCredentials>"
             "<eBayAuthToken>" + token + "</eBayAuthToken>"
             "</RequesterCredentials>"
-            "<Query>" + jan_code + "</Query>"
+            "<Query>" + query_safe + "</Query>"
             "</GetSuggestedCategoriesRequest>"
         )
-        try:
-            resp = requests.post(
-                "https://api.ebay.com/ws/api.dll",
-                headers={**base_headers, "X-EBAY-API-CALL-NAME": "GetSuggestedCategories"},
-                data=xml_body.encode("utf-8"),
-                timeout=15,
-            )
-            if resp.status_code != 200:
-                raise ValueError(f"HTTP {resp.status_code}")
-            root = ET.fromstring(resp.text)
-            ns = {"e": "urn:ebay:apis:eBLBaseComponents"}
-            ack = root.findtext("e:Ack", namespaces=ns)
-            if ack in ("Success", "Warning"):
-                suggestions = root.findall(".//e:SuggestedCategory", ns)
-                best_id  = None
-                best_pct = 0
-                for s in suggestions:
-                    cat_id = s.findtext("e:Category/e:CategoryID", namespaces=ns)
-                    pct    = s.findtext("e:PercentItemFound", namespaces=ns) or "0"
-                    leaf   = s.findtext("e:Category/e:LeafCategory", namespaces=ns)
-                    if cat_id and leaf == "true" and int(pct) > best_pct:
-                        best_pct = int(pct)
-                        best_id  = int(cat_id)
-                if best_id:
-                    print(f"  🏷️  JANコードカテゴリ: {best_id}（EAN: {jan_code} / {best_pct}%マッチ）")
-                    return best_id
-        except Exception as e:
-            print(f"  ⚠️  JANコードカテゴリ取得失敗: {e}")
-
-    # Step 2: タイトルでGetSuggestedCategories（フォールバック）
-    query = title.encode("ascii", errors="ignore").decode()[:60].strip()
-    if not query or len(query) < 3:
-        query = "Japan import goods"
-    query_safe = query.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-    xml_body = (
-        "<?xml version=" + chr(34) + "1.0" + chr(34) + " encoding=" + chr(34) + "utf-8" + chr(34) + "?>"
-        "<GetSuggestedCategoriesRequest xmlns=" + chr(34) + "urn:ebay:apis:eBLBaseComponents" + chr(34) + ">"
-        "<RequesterCredentials>"
-        "<eBayAuthToken>" + token + "</eBayAuthToken>"
-        "</RequesterCredentials>"
-        "<Query>" + query_safe + "</Query>"
-        "</GetSuggestedCategoriesRequest>"
-    )
-    try:
         resp = requests.post(
             "https://api.ebay.com/ws/api.dll",
             headers={**base_headers, "X-EBAY-API-CALL-NAME": "GetSuggestedCategories"},
@@ -314,27 +357,85 @@ def get_best_category(token: str, title: str, jan_code: str = "") -> int:
             timeout=15,
         )
         if resp.status_code != 200:
-            raise ValueError(f"HTTP {resp.status_code}")
+            return 0
         root = ET.fromstring(resp.text)
         ns = {"e": "urn:ebay:apis:eBLBaseComponents"}
-        suggestions = root.findall(".//e:SuggestedCategory", ns)
-        best_id  = None
-        best_pct = 0
-        for s in suggestions:
-            cat_id = s.findtext("e:Category/e:CategoryID", namespaces=ns)
-            pct    = s.findtext("e:PercentItemFound", namespaces=ns) or "0"
-            leaf   = s.findtext("e:Category/e:LeafCategory", namespaces=ns)
-            if cat_id and leaf == "true" and int(pct) > best_pct:
-                best_pct = int(pct)
-                best_id  = int(cat_id)
-        if best_id:
-            print(f"  🏷️  タイトルカテゴリ: {best_id}（{best_pct}%マッチ）")
-            return best_id
-    except Exception as e:
-        print(f"  ⚠️  カテゴリ自動取得失敗: {e}")
+        ack = root.findtext("e:Ack", namespaces=ns)
+        if ack not in ("Success", "Warning"):
+            return 0
 
-    print(f"  🏷️  デフォルトカテゴリ: {EBAY_CATEGORY_MAP['default']}")
-    return EBAY_CATEGORY_MAP["default"]
+        suggestions = root.findall(".//e:SuggestedCategory", ns)
+
+        # 葉カテゴリのみ対象（APIとCSV両方でLeaf確認）
+        best_id, best_pct = None, -1
+        for s in suggestions:
+            cat_id_str = s.findtext("e:Category/e:CategoryID", namespaces=ns)
+            pct        = int(s.findtext("e:PercentItemFound", namespaces=ns) or "0")
+            leaf       = s.findtext("e:Category/e:LeafCategory", namespaces=ns)
+            if cat_id_str and leaf == "true":
+                cat_id_int = int(cat_id_str)
+                if is_leaf_category(cat_id_int) and pct > best_pct:
+                    best_pct = pct
+                    best_id  = cat_id_int
+
+        # 非葉カテゴリは使わない（出品エラーの原因）
+        return best_id or 0
+
+    # Step 1: タイトルでGetSuggestedCategories
+    query = title[:80].strip() or "Japan import goods"
+    try:
+        cat_id = _call_suggested(query)
+        if cat_id:
+            info = EBAY_CATEGORY_DB.get(cat_id, {})
+            path = info.get("path", "")
+            print(f"  🏷️  タイトルカテゴリ: {cat_id}（{path}）")
+            return cat_id
+    except Exception as e:
+        print(f"  ⚠️  タイトルカテゴリ取得失敗: {e}")
+
+    # Step 2: Anthropic AI → CSVの葉カテゴリ候補から選択
+    _config = config or {}
+    if _config.get("ANTHROPIC_API_KEY"):
+        try:
+            category_hints = "\n".join(
+                f"- {name}: {cid}" for name, cid in _AI_CATEGORY_HINTS
+            )
+            valid_ids = {cid for _, cid in _AI_CATEGORY_HINTS}
+            prompt = (
+                f"You are an eBay category expert. Select the MOST SPECIFIC leaf category for this product.\n"
+                f"IMPORTANT: You MUST choose from the list below. Reply with ONLY the numeric ID.\n\n"
+                f"Product: {title}\n\n"
+                f"Leaf categories:\n{category_hints}\n\n"
+                f"Reply with ONLY the numeric category ID from the list above."
+            )
+            resp = requests.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "Content-Type": "application/json",
+                    "x-api-key": _config.get("ANTHROPIC_API_KEY", ""),
+                    "anthropic-version": "2023-06-01",
+                },
+                json={"model": "claude-haiku-4-5-20251001", "max_tokens": 20,
+                      "messages": [{"role": "user", "content": prompt}]},
+                timeout=15,
+            )
+            data = resp.json()
+            if data.get("content"):
+                ai_cat_id = int(data["content"][0]["text"].strip())
+                # リストにあるIDかつ葉カテゴリであることを確認
+                if ai_cat_id in valid_ids and is_leaf_category(ai_cat_id):
+                    info = EBAY_CATEGORY_DB.get(ai_cat_id, {})
+                    path = info.get("path", "")
+                    print(f"  🏷️  AIカテゴリ: {ai_cat_id}（{path}）")
+                    return ai_cat_id
+                else:
+                    print(f"  ⚠️  AI返却カテゴリ {ai_cat_id} は葉カテゴリ外 → スキップ")
+        except Exception as e:
+            print(f"  ⚠️  AIカテゴリ取得失敗: {e}")
+
+    default_id = EBAY_CATEGORY_MAP["default"]
+    print(f"  🏷️  デフォルトカテゴリ: {default_id}")
+    return default_id
 
 
 # ──────────────────────────────────────────────────────────
@@ -427,23 +528,28 @@ def build_listing_data(asin: str, keepa_data: dict, config: dict) -> dict:
     upc = keepa_data.get("upc", "Does not apply")
     mpn = keepa_data.get("mpn", "Does Not Apply")
 
+    # カテゴリを先に決定（Item Specifics生成に活用するため）
+    jan_code    = keepa_data.get("upc", "") or ""
+    category_id = get_best_category(config["EBAY_TOKEN"], title, jan_code=jan_code, config=config)
+    cat_path    = EBAY_CATEGORY_DB.get(category_id, {}).get("path", "")
+
     item_specifics = {}
-    item_specifics["Brand"]    = brand or "Does Not Apply"
-    item_specifics["MPN"]      = mpn
-    item_specifics["Type"]     = "Model Kit"
-    item_specifics["Scale"]    = "1:24"
+    item_specifics["Brand"] = brand or "Does Not Apply"
+    item_specifics["MPN"]   = mpn
     if manufacturer:
         item_specifics["Manufacturer"] = manufacturer
     item_specifics["Country/Region of Manufacture"] = "Japan"
 
-    # Anthropic APIでItem Specificsを自動生成
+    # Anthropic APIでItem Specificsを自動生成（カテゴリ情報を含む）
     try:
         import requests as _req, json as _json
         _prompt = (
             f"You are an eBay listing expert. Generate Item Specifics for this product.\n"
+            f"eBay Category: {cat_path}\n"
             f"Product: {title}\nBrand: {brand or 'N/A'}\nModel: {mpn or 'N/A'}\n"
-            f"Generate ONLY a JSON object with relevant eBay Item Specifics.\n"
-            f"Include: Type, Color, Material, Size, Features, Theme, Age Group etc.\n"
+            f"Generate ONLY a JSON object with relevant eBay Item Specifics for this category.\n"
+            f"Include fields the category may require (Type, Color, Material, Size, Features, Theme, "
+            f"Age Group, Item Width, Item Length, Unit Type, Units per Lot, etc.)\n"
             f"Max 12 fields. No markdown. Example: {{\"Type\": \"Figure\", \"Color\": \"Multi-Color\"}}"
         )
         _resp = _req.post(
@@ -468,10 +574,15 @@ def build_listing_data(asin: str, keepa_data: dict, config: dict) -> dict:
     except Exception as _e:
         print(f"  ⚠️  Item Specifics生成失敗: {_e}")
 
-    # タイトルからeBayの最適カテゴリを自動取得
-    # JANコード（EAN）を優先してカテゴリを自動取得
-    jan_code    = keepa_data.get("upc", "") or ""
-    category_id = get_best_category(config["EBAY_TOKEN"], title, jan_code=jan_code)
+    # カテゴリ固有の必須フィールド補完（寸法データから自動セット）
+    _w = keepa_data.get("width_cm", 0) or 0
+    _l = keepa_data.get("length_cm", 0) or 0
+    _h = keepa_data.get("height_cm", 0) or 0
+    if category_id == 179206:  # Cling Film, Foil & Food Wraps: Width・Length必須
+        if "Item Width" not in item_specifics and _w:
+            item_specifics["Item Width"] = f"{_w} cm"
+        if "Item Length" not in item_specifics and _l:
+            item_specifics["Item Length"] = f"{_l} cm"
 
     return {
         "asin":           asin,

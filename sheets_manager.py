@@ -13,6 +13,7 @@ Google Sheets で商品・価格・在庫を管理するモジュール
   4. スプレッドシートをサービスアカウントのメールアドレスと共有
 """
 
+import time
 import gspread
 from google.oauth2.service_account import Credentials
 from datetime import datetime
@@ -153,13 +154,16 @@ class SheetsManager:
     def log_price(self, asin: str, platform: str, price: float, in_stock: bool):
         ws = self.sheet.worksheet(SHEET_PRICE)
         today = datetime.now().strftime("%Y-%m-%d")
-        ws.append_row([
-            today,
-            asin,
-            platform,
-            price,
-            "在庫あり" if in_stock else "在庫なし",
-        ])
+        row = [today, asin, platform, price, "在庫あり" if in_stock else "在庫なし"]
+        for attempt in range(3):
+            try:
+                ws.append_row(row)
+                return
+            except gspread.exceptions.APIError as e:
+                if attempt < 2:
+                    time.sleep(30)
+                else:
+                    raise
 
     # ──────────────────────────────────────────────────────
     # アラートログ: 書き込み
@@ -173,7 +177,15 @@ class SheetsManager:
             [now, a["type"], a["asin"], a["ebay_id"], a["product"], a["message"]]
             for a in alerts
         ]
-        ws.append_rows(rows)
+        for attempt in range(3):
+            try:
+                ws.append_rows(rows)
+                return
+            except gspread.exceptions.APIError:
+                if attempt < 2:
+                    time.sleep(30)
+                else:
+                    raise
 
     # ──────────────────────────────────────────────────────
     # サマリー: 実行結果を記録
