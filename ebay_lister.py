@@ -141,6 +141,74 @@ class EbayLister:
             "X-EBAY-API-IAF-TOKEN":           token,
             "Content-Type":                   "text/xml",
         }
+        self._campaign_id = ""  # Default campaignIDキャッシュ
+
+    # ──────────────────────────────────────────────────────
+    # Promoted Listings (General) - Default campaign
+    # ──────────────────────────────────────────────────────
+    def _get_default_campaign_id(self) -> str:
+        """Default campaignのIDを取得してキャッシュ"""
+        if self._campaign_id:
+            return self._campaign_id
+        try:
+            resp = requests.get(
+                "https://api.ebay.com/sell/marketing/v1/ad_campaign",
+                headers={
+                    "Authorization": f"Bearer {self.token}",
+                    "Content-Type":  "application/json",
+                },
+                timeout=15,
+            )
+            if resp.status_code == 200:
+                for camp in resp.json().get("campaigns", []):
+                    if camp.get("campaignName") == "Default campaign":
+                        self._campaign_id = camp.get("campaignId", "")
+                        print(f"  📢 Default campaign取得: {self._campaign_id}")
+                        return self._campaign_id
+                # 名前で見つからない場合は最初のRUNNINGキャンペーンを使用
+                for camp in resp.json().get("campaigns", []):
+                    if camp.get("campaignStatus") == "RUNNING":
+                        self._campaign_id = camp.get("campaignId", "")
+                        print(f"  ℹ️  'Default campaign'未発見 → '{camp.get('campaignName')}'を使用")
+                        return self._campaign_id
+            else:
+                print(f"  ⚠️  キャンペーン一覧取得失敗: {resp.status_code}")
+        except Exception as e:
+            print(f"  ⚠️  キャンペーンID取得エラー: {e}")
+        return ""
+
+    def promote_listing(self, item_id: str, bid_pct: float = 2.1) -> bool:
+        """出品済み商品をPromoted Listings General（Default campaign）に追加"""
+        campaign_id = self._get_default_campaign_id()
+        if not campaign_id:
+            print(f"  ⚠️  Promoted Listing: キャンペーンIDが取得できませんでした")
+            return False
+        try:
+            resp = requests.post(
+                f"https://api.ebay.com/sell/marketing/v1/ad_campaign/{campaign_id}/bulk_create_ads_by_listing_id",
+                headers={
+                    "Authorization": f"Bearer {self.token}",
+                    "Content-Type":  "application/json",
+                },
+                json={
+                    "createAdRequests": [
+                        {
+                            "bidPercentage": f"{bid_pct:.2f}",
+                            "listingId":     item_id,
+                        }
+                    ]
+                },
+                timeout=15,
+            )
+            if resp.status_code in (200, 201, 207):
+                print(f"  📢 Promoted Listing設定完了: {item_id}（{bid_pct}%）")
+                return True
+            else:
+                print(f"  ⚠️  Promoted Listing設定失敗: {resp.status_code} {resp.text[:120]}")
+                return False
+        except Exception as e:
+            print(f"  ⚠️  Promoted Listing設定エラー: {e}")
+            return False
 
     # ──────────────────────────────────────────────────────
     # メイン出品処理
@@ -888,6 +956,9 @@ def main():
         if result["success"]:
             ebay_id = result["item_id"]
             print(f"  ✅ 出品成功！ eBay商品ID: {ebay_id}")
+
+            # Promoted Listings General: Default campaign 2.1%
+            lister.promote_listing(ebay_id, bid_pct=2.1)
 
             # 商品マスタに登録
             sheets.add_product(
