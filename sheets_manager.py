@@ -26,11 +26,20 @@ SCOPES = [
 ]
 
 # シート名定義
-SHEET_MASTER   = "商品マスタ"
-SHEET_PENDING  = "出品待ちリスト"
-SHEET_PRICE    = "価格履歴"
-SHEET_ALERT    = "アラートログ"
-SHEET_SUMMARY  = "サマリー"
+SHEET_MASTER    = "商品マスタ"
+SHEET_PENDING   = "出品待ちリスト"
+SHEET_PRICE     = "価格履歴"
+SHEET_ALERT     = "アラートログ"
+SHEET_SUMMARY   = "サマリー"
+SHEET_SETTINGS  = "設定"
+
+# 設定シートのデフォルト値（初回作成時に書き込む）
+DEFAULT_SETTINGS = [
+    ["TARGET_MARGIN",           "0.01",  "目標利益率（例: 0.05 = 5%）"],
+    ["EBAY_FEE_RATE",           "0.17",  "eBay手数料率（例: 0.17 = 17%）"],
+    ["MIN_SELL_PRICE_USD",      "20.0",  "最低販売価格（USD）"],
+    ["PRICE_CHANGE_THRESHOLD",  "0.01",  "価格変動通知閾値（例: 0.05 = 5%以上で通知）"],
+]
 
 # 商品マスタのカラム定義（A列から順番）
 MASTER_COLS = [
@@ -102,6 +111,12 @@ class SheetsManager:
             ws = self.sheet.add_worksheet(SHEET_SUMMARY, rows=100, cols=10)
             ws.append_row(["実行日時", "管理商品数", "アクション件数", "在庫切れ", "価格更新", "再出品"])
             print(f"  📄 シート作成: {SHEET_SUMMARY}")
+
+        if SHEET_SETTINGS not in existing:
+            ws = self.sheet.add_worksheet(SHEET_SETTINGS, rows=50, cols=5)
+            ws.append_row(["設定名", "設定値", "説明"])
+            ws.append_rows(DEFAULT_SETTINGS)
+            print(f"  📄 シート作成: {SHEET_SETTINGS}")
 
     # ──────────────────────────────────────────────────────
     # 商品マスタ: アクティブ商品を取得
@@ -272,6 +287,37 @@ class SheetsManager:
             return ws.find(jan_code, in_column=1)
         except Exception:
             return None
+
+    # ──────────────────────────────────────────────────────
+    # 設定シート: 読み込み
+    # ──────────────────────────────────────────────────────
+    def get_settings(self) -> dict:
+        """
+        「設定」シートから設定値を読み込んで辞書で返す。
+        数値に変換できる値は float に変換する。
+        シートが存在しない・空の場合は空辞書を返す。
+        """
+        try:
+            ws = self.sheet.worksheet(SHEET_SETTINGS)
+            rows = ws.get_all_values()
+            if len(rows) < 2:
+                return {}
+            result = {}
+            for row in rows[1:]:  # 1行目はヘッダー
+                if not row or not row[0].strip():
+                    continue
+                key = row[0].strip()
+                raw = row[1].strip() if len(row) > 1 else ""
+                if not raw:
+                    continue
+                try:
+                    result[key] = float(raw)
+                except ValueError:
+                    result[key] = raw
+            return result
+        except Exception as e:
+            print(f"  ⚠️  設定シート読み込み失敗: {e}")
+            return {}
 
     def update_pending_status_by_jan(self, jan_code: str, status: str):
         """出品待ちリストのJANコード行のステータスを更新"""

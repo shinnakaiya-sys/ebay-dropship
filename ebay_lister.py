@@ -897,6 +897,15 @@ def main():
     print("=" * 60)
 
     sheets = SheetsManager(CONFIG["SHEET_ID"])
+
+    # 設定シートから利益率などを上書き
+    _settings = sheets.get_settings()
+    _OVERRIDABLE = ["TARGET_MARGIN", "EBAY_FEE_RATE", "MIN_SELL_PRICE_USD", "PRICE_CHANGE_THRESHOLD"]
+    for _key in _OVERRIDABLE:
+        if _key in _settings:
+            CONFIG[_key] = _settings[_key]
+    print(f"  📊 利益率: {CONFIG['TARGET_MARGIN']*100:.1f}%（設定シートより）")
+
     keepa  = KeepaChecker(CONFIG["KEEPA_API_KEY"])
     lister = EbayLister(CONFIG["EBAY_TOKEN"])
 
