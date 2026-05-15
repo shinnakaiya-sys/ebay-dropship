@@ -87,12 +87,13 @@ class SheetsManager:
             ws.append_row(MASTER_COLS)
             print(f"  📄 シート作成: {SHEET_MASTER}")
         else:
-            # 既存シートのヘッダーをJANコード対応に更新（初回のみ）
+            # ヘッダー行を常に MASTER_COLS に合わせて更新
             ws = self.sheet.worksheet(SHEET_MASTER)
             headers = ws.row_values(1)
-            if headers and headers[0] == "ASIN":
-                ws.update("A1:J1", [MASTER_COLS])
-                print(f"  🔄 {SHEET_MASTER}: ヘッダーをJANコード対応に更新")
+            end_col = chr(ord("A") + len(MASTER_COLS) - 1)  # 列数に応じたアルファベット
+            if headers != MASTER_COLS:
+                ws.update(f"A1:{end_col}1", [MASTER_COLS])
+                print(f"  🔄 {SHEET_MASTER}: ヘッダーを更新（{end_col}列まで）")
 
         if SHEET_PRICE not in existing:
             ws = self.sheet.add_worksheet(SHEET_PRICE, rows=10000, cols=10)
@@ -126,7 +127,7 @@ class SheetsManager:
     def get_active_products(self) -> list[dict]:
         """ステータスが「出品中」または「在庫切れ停止」の商品を返す"""
         ws = self.sheet.worksheet(SHEET_MASTER)
-        records = ws.get_all_records()
+        records = ws.get_all_records(expected_headers=MASTER_COLS)
         active = [
             r for r in records
             if r.get("ステータス") in ("出品中", "在庫切れ停止")
