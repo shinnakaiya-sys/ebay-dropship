@@ -207,7 +207,7 @@ class EbayLister:
                     "Content-Type":  "application/json",
                 },
                 json={
-                    "createAdRequests": [
+                    "requests": [
                         {
                             "bidPercentage": f"{bid_pct:.2f}",
                             "listingId":     item_id,
