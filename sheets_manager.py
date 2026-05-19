@@ -19,6 +19,15 @@ from google.oauth2.service_account import Credentials
 from datetime import datetime
 
 
+def _col_letter(n: int) -> str:
+    """1始まりの列番号をスプレッドシートの列名に変換 (1→A, 26→Z, 27→AA)"""
+    result = ""
+    while n > 0:
+        n, r = divmod(n - 1, 26)
+        result = chr(65 + r) + result
+    return result
+
+
 # Google Sheets アクセス権限
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -92,12 +101,12 @@ class SheetsManager:
             # ヘッダー行を常に MASTER_COLS に合わせて更新
             ws = self.sheet.worksheet(SHEET_MASTER)
             headers = ws.row_values(1)
-            end_col = chr(ord("A") + len(MASTER_COLS) - 1)  # 列数に応じたアルファベット
+            end_col = _col_letter(len(MASTER_COLS))
             if headers != MASTER_COLS:
-                # N列より右に古いデータが残っている場合はクリア
+                # 既存ヘッダーが多い場合は余分な列をクリア
                 if len(headers) > len(MASTER_COLS):
-                    extra_start = chr(ord("A") + len(MASTER_COLS))
-                    extra_end   = chr(ord("A") + len(headers) - 1)
+                    extra_start = _col_letter(len(MASTER_COLS) + 1)
+                    extra_end   = _col_letter(len(headers))
                     ws.batch_clear([f"{extra_start}1:{extra_end}1"])
                 ws.update(f"A1:{end_col}1", [MASTER_COLS])
                 print(f"  🔄 {SHEET_MASTER}: ヘッダーを更新（{end_col}列まで）")
