@@ -139,19 +139,24 @@ def main():
             and abs(ebay_price - new_price) / new_price > CONFIG["PRICE_CHANGE_THRESHOLD"]
         )
         # ──────────────────────────────────────
-        # 3. 競合（日本発送）最安値を取得
+        # 3. 競合最安値 & 自分の順位を1回の検索で取得
         # ──────────────────────────────────────
-        rival = ebay.get_jp_lowest_price(
+        stats = ebay.get_jp_search_stats(
             product.get("JANコード", ""),
+            CONFIG.get("EBAY_SELLER_ID", ""),
             CONFIG.get("EBAY_APP_ID", ""),
             client_secret=CONFIG.get("EBAY_CLIENT_SECRET", ""),
-            exclude_item_id=ebay_id,
         )
-        sheets.update_rival_price(asin, rival["lowest_price"], rival["count"])
-        if rival["lowest_price"] > 0:
-            print(f"  🏷️  競合最安値: ${rival['lowest_price']} (出品数:{rival['count']})")
+        sheets.update_rival_price(asin, stats["lowest_price"], stats["count"])
+        sheets.update_my_rank(asin, stats["my_rank"])
+        if stats["lowest_price"] > 0:
+            print(f"  🏷️  競合最安値: ${stats['lowest_price']} (出品数:{stats['count']})")
         else:
             print(f"  🏷️  競合なし or 取得不可")
+        if stats["my_rank"] is not None:
+            print(f"  📊 自分の順位: {stats['my_rank']}位")
+        else:
+            print(f"  📊 自分の出品が見つかりませんでした")
         time.sleep(1)  # APIレートリミット対策
 
         # ──────────────────────────────────────

@@ -208,62 +208,100 @@ class EbayChecker:
         )
         return resp.json().get("access_token", "")
 
-    def get_jp_lowest_price(self, jan_code: str, app_id: str, client_secret: str = "", exclude_item_id: str = "") -> dict:
+    def get_jp_search_stats(self, jan_code: str, seller_id: str, app_id: str, client_secret: str = "") -> dict:
         """
-        JANコード（EAN）でeBay Browse APIを使い日本発送出品の最安値（送料込み）を取得する
+        JANコードでeBay Browse APIを使い、1回の検索で以下を取得する:
+        - 競合セラー（自分以外）の最安値（送料込み）
+        - 日本発送の出品総数
+        - 自分のセラーIDが最安値順で何番目か
 
         Returns:
             {
-                "lowest_price": float,   # 最安値（送料込み、USD）
-                "count": int,            # 日本発送の出品数
+                "lowest_price": float,    # 競合最安値（送料込み、USD）
+                "count": int,             # 日本発送の出品総数
+                "my_rank": int | None,    # 自分の順位（見つからない場合はNone）
             }
         """
         if not app_id or not client_secret:
             print(f"  ⚠️  EBAY_APP_ID / EBAY_CLIENT_SECRET未設定")
-            return {"lowest_price": 0.0, "count": 0}
+            return {"lowest_price": 0.0, "count": 0, "my_rank": None}
         if not jan_code:
-            return {"lowest_price": 0.0, "count": 0}
+            return {"lowest_price": 0.0, "count": 0, "my_rank": None}
 
         try:
             token = self._get_browse_token(app_id, client_secret)
             if not token:
                 print(f"  ⚠️  Browse APIトークン取得失敗")
-                return {"lowest_price": 0.0, "count": 0}
+                return {"lowest_price": 0.0, "count": 0, "my_rank": None}
 
-            resp = requests.get(
-                "https://api.ebay.com/buy/browse/v1/item_summary/search",
-                headers={"Authorization": f"Bearer {token}"},
-                params={
-                    "q":      str(jan_code),
-                    "filter": "itemLocationCountry:JP",
-                    "sort":   "price",
-                    "limit":  "10",
-                },
-                timeout=10,
-            )
-            data = resp.json()
-            items = data.get("itemSummaries", [])
-            total_entries = data.get("total", 0)
+            lowest_competitor = float("inf")
+            my_rank = None
+            total_entries = 0
+            rank = 0
+            offset = 0
+            limit = 50  # Browse APIの最大値
 
-            lowest = float("inf")
-            for item in items:
-                if exclude_item_id and item.get("itemId") == exclude_item_id:
-                    continue
-                price = float(item.get("price", {}).get("value", 0))
-                shipping_options = item.get("shippingOptions", [])
-                shipping = float(shipping_options[0].get("shippingCost", {}).get("value", 0)) if shipping_options else 0.0
-                total = price + shipping
-                if total > 0 and total < lowest:
-                    lowest = total
+            while True:
+                resp = requests.get(
+                    "https://api.ebay.com/buy/browse/v1/item_summary/search",
+                    headers={"Authorization": f"Bearer {token}"},
+                    params={
+                        "q":      str(jan_code),
+                        "filter": "itemLocationCountry:JP",
+                        "sort":   "price",
+                        "limit":  str(limit),
+                        "offset": str(offset),
+                    },
+                    timeout=10,
+                )
+                data = resp.json()
+                items = data.get("itemSummaries", [])
+                if offset == 0:
+                    total_entries = data.get("total", 0)
+                if not items:
+                    break
+
+                for item in items:
+                    rank += 1
+                    item_seller = item.get("seller", {}).get("username", "")
+                    is_mine = item_seller.lower() == seller_id.lower() if seller_id else False
+
+                    if is_mine:
+                        if my_rank is None:
+                            my_rank = rank
+                    else:
+                        price = float(item.get("price", {}).get("value", 0))
+                        shipping_options = item.get("shippingOptions", [])
+                        shipping = float(shipping_options[0].get("shippingCost", {}).get("value", 0)) if shipping_options else 0.0
+                        total = price + shipping
+                        if total > 0 and total < lowest_competitor:
+                            lowest_competitor = total
+
+                # 自分の順位が見つかった、かつ最安値も確定したら終了
+                # （最安値は最初のページで確定するため1ページで十分）
+                offset += limit
+                if offset >= total_entries or offset >= 200:
+                    break
+                # 最安値は取得済み（price昇順なので最初のページが最安値）
+                if lowest_competitor != float("inf"):
+                    # 自分の順位がまだ見つかっていない場合のみ継続
+                    if my_rank is not None:
+                        break
 
             return {
-                "lowest_price": round(lowest, 2) if lowest != float("inf") else 0.0,
+                "lowest_price": round(lowest_competitor, 2) if lowest_competitor != float("inf") else 0.0,
                 "count": total_entries,
+                "my_rank": my_rank,
             }
 
         except Exception as e:
-            print(f"  ⚠️  競合価格取得エラー: {e}")
-            return {"lowest_price": 0.0, "count": 0}
+            print(f"  ⚠️  競合価格・順位取得エラー: {e}")
+            return {"lowest_price": 0.0, "count": 0, "my_rank": None}
+
+    # 後方互換のため残す（内部でget_jp_search_statsに委譲）
+    def get_jp_lowest_price(self, jan_code: str, app_id: str, client_secret: str = "", exclude_item_id: str = "") -> dict:
+        stats = self.get_jp_search_stats(jan_code, "", app_id, client_secret)
+        return {"lowest_price": stats["lowest_price"], "count": stats["count"]}
 
     # ──────────────────────────────────────────────────────
     # 在庫復活（Active+在庫0 → ReviseItem、Ended → RelistItem）
@@ -304,6 +342,63 @@ class EbayChecker:
   </Item>
 </RelistItemRequest>"""
             return self._call_api("RelistItem", xml_body, item_id, "再出品（Ended→Relist）")
+
+    def get_my_rank_in_search(self, jan_code: str, seller_id: str, app_id: str, client_secret: str) -> int | None:
+        """
+        JANコードでeBayを最安値順に検索し、自分のセラーIDが何番目に表示されるかを返す。
+        見つからない場合は None を返す。
+
+        Returns:
+            int: 1始まりの順位（例: 3 → 3番目）
+            None: 出品が見つからない
+        """
+        if not all([jan_code, seller_id, app_id, client_secret]):
+            return None
+
+        try:
+            token = self._get_browse_token(app_id, client_secret)
+            if not token:
+                return None
+
+            rank = 0
+            offset = 0
+            limit = 50  # Browse APIの最大値
+
+            while True:
+                resp = requests.get(
+                    "https://api.ebay.com/buy/browse/v1/item_summary/search",
+                    headers={"Authorization": f"Bearer {token}"},
+                    params={
+                        "q":      str(jan_code),
+                        "filter": "itemLocationCountry:JP",
+                        "sort":   "price",
+                        "limit":  str(limit),
+                        "offset": str(offset),
+                    },
+                    timeout=10,
+                )
+                data = resp.json()
+                items = data.get("itemSummaries", [])
+                if not items:
+                    break
+
+                for item in items:
+                    rank += 1
+                    item_seller = item.get("seller", {}).get("username", "")
+                    if item_seller.lower() == seller_id.lower():
+                        return rank
+
+                # 全件取得済み or 最大200件でやめる
+                total = data.get("total", 0)
+                offset += limit
+                if offset >= total or offset >= 200:
+                    break
+
+            return None
+
+        except Exception as e:
+            print(f"  ⚠️  順位取得エラー: {e}")
+            return None
 
     def _empty_result(self, item_id: str) -> dict:
         return {

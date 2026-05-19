@@ -58,6 +58,8 @@ MASTER_COLS = [
     "競合最安値(USD)", # L  日本発送セラーの最安値（送料込み）
     "競合出品数",      # M
     "利益率",          # N  空欄=設定シートのグローバル値を使用（例: 0.05 = 5%）
+    "最安値順URL",     # O  JANコード検索・最安値順のeBay URL
+    "自分の順位",      # P  最安値順で自分のアカウントが何番目か
 ]
 
 # 出品待ちリストのカラム定義
@@ -92,6 +94,11 @@ class SheetsManager:
             headers = ws.row_values(1)
             end_col = chr(ord("A") + len(MASTER_COLS) - 1)  # 列数に応じたアルファベット
             if headers != MASTER_COLS:
+                # N列より右に古いデータが残っている場合はクリア
+                if len(headers) > len(MASTER_COLS):
+                    extra_start = chr(ord("A") + len(MASTER_COLS))
+                    extra_end   = chr(ord("A") + len(headers) - 1)
+                    ws.batch_clear([f"{extra_start}1:{extra_end}1"])
                 ws.update(f"A1:{end_col}1", [MASTER_COLS])
                 print(f"  🔄 {SHEET_MASTER}: ヘッダーを更新（{end_col}列まで）")
 
@@ -261,6 +268,13 @@ class SheetsManager:
     # ──────────────────────────────────────────────────────
     # ヘルパー
     # ──────────────────────────────────────────────────────
+    def update_my_rank(self, asin: str, rank):
+        """自分の順位をP列（16列目）に更新"""
+        ws = self.sheet.worksheet(SHEET_MASTER)
+        cell = self._find_asin_cell(ws, asin)
+        if cell:
+            ws.update_cell(cell.row, 16, rank if rank is not None else "")  # P列
+
     def update_rival_price(self, asin: str, lowest_price: float, count: int):
         """競合最安値・競合出品数を更新（L・M列）"""
         ws = self.sheet.worksheet(SHEET_MASTER)
@@ -273,7 +287,7 @@ class SheetsManager:
         """B列（ASIN）またはA列（JANコード）から検索してセルを返す"""
         try:
             # B列（ASIN）で検索
-            cell = ws.find(asin, in_column=2)
+            cell = ws.find(asin, in_column=1)
             if cell:
                 return cell
         except Exception:
