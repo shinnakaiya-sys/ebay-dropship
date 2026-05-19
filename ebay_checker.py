@@ -210,10 +210,10 @@ class EbayChecker:
 
     def get_jp_search_stats(self, jan_code: str, seller_id: str, app_id: str, client_secret: str = "") -> dict:
         """
-        JANコードでeBay Browse APIを使い、1回の検索で以下を取得する:
-        - 競合セラー（自分以外）の最安値（送料込み）
-        - 日本発送の出品総数
-        - 自分のセラーIDが最安値順で何番目か
+        JANコード（EAN）で日本発送出品を検索し、競合最安値・出品数・自分の順位を返す。
+
+        Finding API の findItemsByProduct（EAN検索）を使うため、
+        出品タイトルにJANコードが含まれていない商品も正確にヒットする。
 
         Returns:
             {
@@ -222,83 +222,111 @@ class EbayChecker:
                 "my_rank": int | None,    # 自分の順位（見つからない場合はNone）
             }
         """
-        if not app_id or not client_secret:
-            print(f"  ⚠️  EBAY_APP_ID / EBAY_CLIENT_SECRET未設定")
-            return {"lowest_price": 0.0, "count": 0, "my_rank": None}
-        if not jan_code:
+        if not app_id or not jan_code:
             return {"lowest_price": 0.0, "count": 0, "my_rank": None}
 
         try:
-            token = self._get_browse_token(app_id, client_secret)
-            if not token:
-                print(f"  ⚠️  Browse APIトークン取得失敗")
-                return {"lowest_price": 0.0, "count": 0, "my_rank": None}
-
-            lowest_competitor = float("inf")
-            my_rank = None
-            total_entries = 0
-            rank = 0
-            offset = 0
-            limit = 50  # Browse APIの最大値
-
-            while True:
-                resp = requests.get(
-                    "https://api.ebay.com/buy/browse/v1/item_summary/search",
-                    headers={"Authorization": f"Bearer {token}"},
-                    params={
-                        "q":      str(jan_code),
-                        "filter": "itemLocationCountry:JP",
-                        "sort":   "price",
-                        "limit":  str(limit),
-                        "offset": str(offset),
-                    },
-                    timeout=10,
-                )
-                data = resp.json()
-                items = data.get("itemSummaries", [])
-                if offset == 0:
-                    total_entries = data.get("total", 0)
-                if not items:
-                    break
-
-                for item in items:
-                    rank += 1
-                    item_seller = item.get("seller", {}).get("username", "")
-                    is_mine = item_seller.lower() == seller_id.lower() if seller_id else False
-
-                    if is_mine:
-                        if my_rank is None:
-                            my_rank = rank
-                    else:
-                        price = float(item.get("price", {}).get("value", 0))
-                        shipping_options = item.get("shippingOptions", [])
-                        shipping = float(shipping_options[0].get("shippingCost", {}).get("value", 0)) if shipping_options else 0.0
-                        total = price + shipping
-                        if total > 0 and total < lowest_competitor:
-                            lowest_competitor = total
-
-                # 自分の順位が見つかった、かつ最安値も確定したら終了
-                # （最安値は最初のページで確定するため1ページで十分）
-                offset += limit
-                if offset >= total_entries or offset >= 200:
-                    break
-                # 最安値は取得済み（price昇順なので最初のページが最安値）
-                if lowest_competitor != float("inf"):
-                    # 自分の順位がまだ見つかっていない場合のみ継続
-                    if my_rank is not None:
-                        break
-
-            return {
-                "lowest_price": round(lowest_competitor, 2) if lowest_competitor != float("inf") else 0.0,
-                "count": total_entries,
-                "my_rank": my_rank,
-            }
-
+            items, total_entries = self._find_jp_items_by_ean(jan_code, app_id)
         except Exception as e:
             print(f"  ⚠️  競合価格・順位取得エラー: {e}")
             return {"lowest_price": 0.0, "count": 0, "my_rank": None}
 
-    # 後方互換のため残す（内部でget_jp_search_statsに委譲）
+        if not items:
+            return {"lowest_price": 0.0, "count": total_entries, "my_rank": None}
+
+        lowest_competitor = float("inf")
+        my_rank = None
+
+        for rank, item in enumerate(items, start=1):
+            is_mine = (
+                seller_id
+                and item["seller"].lower() == seller_id.lower()
+            )
+            if is_mine:
+                if my_rank is None:
+                    my_rank = rank
+            else:
+                total_price = item["price"] + item["shipping"]
+                if total_price > 0 and total_price < lowest_competitor:
+                    lowest_competitor = total_price
+
+        return {
+            "lowest_price": round(lowest_competitor, 2) if lowest_competitor != float("inf") else 0.0,
+            "count": total_entries,
+            "my_rank": my_rank,
+        }
+
+    def _find_jp_items_by_ean(self, ean: str, app_id: str) -> tuple[list, int]:
+        """
+        Finding API の findItemsByProduct（EAN）で日本発送出品を最安値順に取得。
+        タイトルにEANが含まれない出品も商品カタログ照合でヒットする。
+
+        Returns: (items_list, total_entries)
+            items_list: [{"seller": str, "price": float, "shipping": float}, ...]
+        """
+        all_items = []
+        total_entries = 0
+        page = 1
+
+        while True:
+            resp = requests.get(
+                "https://svcs.ebay.com/services/search/FindingService/v1",
+                params={
+                    "OPERATION-NAME":                "findItemsByProduct",
+                    "SERVICE-VERSION":               "1.0.0",
+                    "SECURITY-APPNAME":              app_id,
+                    "RESPONSE-DATA-FORMAT":          "JSON",
+                    "productId.@type":               "EAN",
+                    "productId":                     ean,
+                    "itemFilter(0).name":            "LocatedIn",
+                    "itemFilter(0).value":           "JP",
+                    "itemFilter(1).name":            "ListingType",
+                    "itemFilter(1).value(0)":        "FixedPrice",
+                    "itemFilter(1).value(1)":        "StoreInventory",
+                    "sortOrder":                     "PricePlusShippingLowest",
+                    "paginationInput.entriesPerPage": "100",
+                    "paginationInput.pageNumber":    str(page),
+                },
+                timeout=10,
+            )
+            data = resp.json()
+            response = data.get("findItemsByProductResponse", [{}])[0]
+
+            if response.get("ack", [""])[0] not in ("Success", "Warning"):
+                error = response.get("errorMessage", [{}])[0].get("error", [{}])[0].get("message", ["不明"])[0]
+                print(f"  ⚠️  Finding APIエラー: {error}")
+                break
+
+            if page == 1:
+                total_entries = int(
+                    response.get("paginationOutput", [{}])[0].get("totalEntries", ["0"])[0]
+                )
+
+            items = response.get("searchResult", [{}])[0].get("item", [])
+            if not items:
+                break
+
+            for item in items:
+                seller = item.get("sellerInfo", [{}])[0].get("sellerUserName", [""])[0]
+                price  = float(
+                    item.get("sellingStatus", [{}])[0]
+                        .get("currentPrice", [{"__value__": "0"}])[0]
+                        .get("__value__", "0")
+                )
+                shipping_info = item.get("shippingInfo", [{}])[0]
+                shipping = float(
+                    shipping_info.get("shippingServiceCost", [{"__value__": "0"}])[0]
+                                 .get("__value__", "0")
+                )
+                all_items.append({"seller": seller, "price": price, "shipping": shipping})
+
+            if len(all_items) >= total_entries or len(all_items) >= 200:
+                break
+            page += 1
+
+        return all_items, total_entries
+
+    # 後方互換のため残す
     def get_jp_lowest_price(self, jan_code: str, app_id: str, client_secret: str = "", exclude_item_id: str = "") -> dict:
         stats = self.get_jp_search_stats(jan_code, "", app_id, client_secret)
         return {"lowest_price": stats["lowest_price"], "count": stats["count"]}
