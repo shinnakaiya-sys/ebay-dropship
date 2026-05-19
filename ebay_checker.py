@@ -354,6 +354,8 @@ class EbayChecker:
         total_entries = 0
         offset = 0
         limit = 50
+        retry_count = 0
+        MAX_RETRIES = 2
 
         while True:
             params = {**query_params, "sort": "price", "limit": str(limit), "offset": str(offset)}
@@ -371,9 +373,15 @@ class EbayChecker:
             )
 
             if resp.status_code == 429:
-                print(f"  ⚠️  Browse APIレート制限 (429) → 10秒待機後リトライ")
-                import time as _t; _t.sleep(10)
+                if retry_count >= MAX_RETRIES:
+                    print(f"  ⚠️  Browse APIレート制限 (429) リトライ上限到達 → スキップ")
+                    break
+                wait = int(resp.headers.get("Retry-After", 10))
+                print(f"  ⚠️  Browse APIレート制限 (429) → {wait}秒待機後リトライ ({retry_count+1}/{MAX_RETRIES})")
+                import time as _t; _t.sleep(wait)
+                retry_count += 1
                 continue
+            retry_count = 0  # 成功したらリセット
             if resp.status_code != 200:
                 print(f"  ⚠️  Browse API エラー: HTTP {resp.status_code}")
                 break
