@@ -138,27 +138,7 @@ def main():
             ebay_price > 0
             and abs(ebay_price - new_price) / new_price > CONFIG["PRICE_CHANGE_THRESHOLD"]
         )
-        # ──────────────────────────────────────
-        # 3. 競合最安値 & 自分の順位を1回の検索で取得
-        # ──────────────────────────────────────
-        stats = ebay.get_jp_search_stats(
-            product.get("JANコード", ""),
-            CONFIG.get("EBAY_SELLER_ID", ""),
-            CONFIG.get("EBAY_APP_ID", ""),
-            client_secret=CONFIG.get("EBAY_CLIENT_SECRET", ""),
-            product_name=product.get("商品名", ""),
-        )
-        sheets.update_rival_price(asin, stats["lowest_price"], stats["count"])
-        sheets.update_my_rank(asin, stats["my_rank"])
-        if stats["lowest_price"] > 0:
-            print(f"  🏷️  競合最安値: ${stats['lowest_price']} (出品数:{stats['count']})")
-        else:
-            print(f"  🏷️  競合なし or 取得不可")
-        if stats["my_rank"] is not None:
-            print(f"  📊 自分の順位: {stats['my_rank']}位")
-        else:
-            print(f"  📊 自分の出品が見つかりませんでした")
-        time.sleep(1)  # APIレートリミット対策
+        time.sleep(0.5)  # APIレートリミット対策
 
         # ──────────────────────────────────────
         # 4. 判定ロジック
