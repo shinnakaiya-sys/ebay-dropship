@@ -220,12 +220,15 @@ class EbayChecker:
         self._browse_token_expires = _time.time() + expires_in
         return self._browse_token
 
-    def get_jp_search_stats(self, jan_code: str, seller_id: str, app_id: str, client_secret: str = "") -> dict:
+    def get_jp_search_stats(self, jan_code: str, seller_id: str, app_id: str,
+                            client_secret: str = "", product_name: str = "") -> dict:
         """
-        JANコード（EAN）で日本発送出品を最安値順に検索し、競合最安値・出品数・自分の順位を返す。
+        日本発送出品を最安値順に検索し、競合最安値・出品数・自分の順位を返す。
 
-        Browse API の gtin パラメータでカタログ照合検索するため、
-        タイトルにJANコードが含まれない出品もヒットする。
+        検索優先順位:
+          1. gtin=JAN（カタログ照合・最精度）
+          2. q=JAN（タイトル一致）
+          3. q=商品名（product_name を指定した場合のフォールバック）
 
         Returns:
             {
@@ -234,7 +237,9 @@ class EbayChecker:
                 "my_rank": int | None,    # 自分の順位（見つからない場合はNone）
             }
         """
-        if not app_id or not client_secret or not jan_code:
+        if not app_id or not client_secret:
+            return {"lowest_price": 0.0, "count": 0, "my_rank": None}
+        if not jan_code and not product_name:
             return {"lowest_price": 0.0, "count": 0, "my_rank": None}
 
         try:
@@ -243,78 +248,43 @@ class EbayChecker:
                 print(f"  ⚠️  Browse APIトークン取得失敗")
                 return {"lowest_price": 0.0, "count": 0, "my_rank": None}
 
+            # 検索キーワードの優先順位リストを作成
+            search_attempts = []
+            if jan_code:
+                search_attempts.append({"gtin": str(jan_code)})        # 1. GTINカタログ照合
+                search_attempts.append({"q": str(jan_code)})           # 2. JAN文字列検索
+            if product_name:
+                search_attempts.append({"q": product_name[:80]})       # 3. 商品名フォールバック
+
+            for attempt_params in search_attempts:
+                items, total_entries = self._browse_search_all(
+                    token, attempt_params,
+                    extra_filter="itemLocationCountry:JP",
+                )
+                if items:
+                    break  # 結果が得られたら終了
+            else:
+                return {"lowest_price": 0.0, "count": 0, "my_rank": None}
+
             lowest_competitor = float("inf")
             my_rank = None
-            total_entries = 0
-            rank = 0
-            offset = 0
-            limit = 50
 
-            while True:
-                # gtin パラメータでEAN/JANコードをカタログ照合検索
-                resp = requests.get(
-                    "https://api.ebay.com/buy/browse/v1/item_summary/search",
-                    headers={"Authorization": f"Bearer {token}"},
-                    params={
-                        "gtin":   str(jan_code),
-                        "filter": "itemLocationCountry:JP",
-                        "sort":   "price",
-                        "limit":  str(limit),
-                        "offset": str(offset),
-                    },
-                    timeout=10,
-                )
-                data = resp.json()
+            for rank, item in enumerate(items, start=1):
+                item_seller = item.get("seller", {}).get("username", "")
+                is_mine = seller_id and item_seller.lower() == seller_id.lower()
 
-                if offset == 0:
-                    total_entries = data.get("total", 0)
-
-                items = data.get("itemSummaries", [])
-                if not items:
-                    # gtin で結果なし → q=jancode にフォールバック
-                    if offset == 0:
-                        resp2 = requests.get(
-                            "https://api.ebay.com/buy/browse/v1/item_summary/search",
-                            headers={"Authorization": f"Bearer {token}"},
-                            params={
-                                "q":      str(jan_code),
-                                "filter": "itemLocationCountry:JP",
-                                "sort":   "price",
-                                "limit":  str(limit),
-                                "offset": "0",
-                            },
-                            timeout=10,
-                        )
-                        data2 = resp2.json()
-                        total_entries = data2.get("total", 0)
-                        items = data2.get("itemSummaries", [])
-                    if not items:
-                        break
-
-                for item in items:
-                    rank += 1
-                    item_seller = item.get("seller", {}).get("username", "")
-                    is_mine = seller_id and item_seller.lower() == seller_id.lower()
-
-                    if is_mine:
-                        if my_rank is None:
-                            my_rank = rank
-                    else:
-                        price = float(item.get("price", {}).get("value", 0))
-                        shipping_options = item.get("shippingOptions", [])
-                        shipping = float(
-                            shipping_options[0].get("shippingCost", {}).get("value", 0)
-                        ) if shipping_options else 0.0
-                        total = price + shipping
-                        if total > 0 and total < lowest_competitor:
-                            lowest_competitor = total
-
-                offset += limit
-                if offset >= total_entries or offset >= 200:
-                    break
-                # 最安値確定 & 自分の順位も確定したら終了
-                if lowest_competitor != float("inf") and my_rank is not None:
-                    break
+                if is_mine:
+                    if my_rank is None:
+                        my_rank = rank
+                else:
+                    price = float(item.get("price", {}).get("value", 0))
+                    shipping_options = item.get("shippingOptions", [])
+                    shipping = float(
+                        shipping_options[0].get("shippingCost", {}).get("value", 0)
+                    ) if shipping_options else 0.0
+                    total = price + shipping
+                    if total > 0 and total < lowest_competitor:
+                        lowest_competitor = total
 
             return {
                 "lowest_price": round(lowest_competitor, 2) if lowest_competitor != float("inf") else 0.0,
@@ -370,6 +340,59 @@ class EbayChecker:
   </Item>
 </RelistItemRequest>"""
             return self._call_api("RelistItem", xml_body, item_id, "再出品（Ended→Relist）")
+
+    def _browse_search_all(self, token: str, query_params: dict,
+                           extra_filter: str = "", max_items: int = 200) -> tuple[list, int]:
+        """
+        Browse API を最安値順でページネーションして全件取得する。
+
+        query_params: {"q": "keyword"} または {"gtin": "jancode"} など
+        extra_filter: "itemLocationCountry:JP" など追加フィルター
+        Returns: (items_list, total_count)
+        """
+        all_items = []
+        total_entries = 0
+        offset = 0
+        limit = 50
+
+        while True:
+            params = {**query_params, "sort": "price", "limit": str(limit), "offset": str(offset)}
+            if extra_filter:
+                params["filter"] = extra_filter
+
+            resp = requests.get(
+                "https://api.ebay.com/buy/browse/v1/item_summary/search",
+                headers={
+                    "Authorization":            f"Bearer {token}",
+                    "X-EBAY-C-MARKETPLACE-ID":  "EBAY_US",
+                },
+                params=params,
+                timeout=10,
+            )
+
+            if resp.status_code == 429:
+                print(f"  ⚠️  Browse APIレート制限 (429) → 10秒待機後リトライ")
+                import time as _t; _t.sleep(10)
+                continue
+            if resp.status_code != 200:
+                print(f"  ⚠️  Browse API エラー: HTTP {resp.status_code}")
+                break
+
+            data = resp.json()
+            if offset == 0:
+                total_entries = data.get("total", 0)
+
+            items = data.get("itemSummaries", [])
+            if not items:
+                break
+
+            all_items.extend(items)
+
+            offset += limit
+            if offset >= total_entries or offset >= max_items:
+                break
+
+        return all_items, total_entries
 
     def get_my_rank_in_search(self, jan_code: str, seller_id: str, app_id: str, client_secret: str) -> int | None:
         """

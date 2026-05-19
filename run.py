@@ -146,6 +146,7 @@ def main():
             CONFIG.get("EBAY_SELLER_ID", ""),
             CONFIG.get("EBAY_APP_ID", ""),
             client_secret=CONFIG.get("EBAY_CLIENT_SECRET", ""),
+            product_name=product.get("商品名", ""),
         )
         sheets.update_rival_price(asin, stats["lowest_price"], stats["count"])
         sheets.update_my_rank(asin, stats["my_rank"])
