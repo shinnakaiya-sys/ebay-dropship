@@ -69,55 +69,38 @@ def is_leaf_category(cat_id: int) -> bool:
     return info["is_leaf"]
 
 
-# AIフォールバック用の葉カテゴリ候補（CSVから選定）
-_AI_CATEGORY_HINTS = [
-    # ─── Toys & Hobbies ───
-    ("Action Figures (anime, SH Figuarts, statues, character figures)", 261068),
-    ("Action Figures Playsets (figure set with accessories)", 261069),
-    ("Model Kits - Figures (Gundam, 30MS, mecha, character model kits)", 262324),
-    ("Model Kits - Automotive (car, motorcycle model kits)", 262320),
-    ("Model Kits - Aircraft (plane model kits)", 262319),
-    ("Model Kits - Boats & Ships", 262321),
-    ("Other Models & Kits (Bandai, Tamiya snap kits)", 262335),
-    ("RC Cars, Trucks & Motorcycles (complete RC vehicle)", 182183),
-    ("RC Wheels, Tires, Rims & Hubs (RC spare parts)", 182201),
-    ("RC Suspension & Steering Parts (RC spare parts)", 182199),
-    ("Dolls & Doll Playsets (Licca-chan, fashion dolls, Barbie-type)", 262346),
-    ("Dollhouse Dolls & Animals (Sylvanian Families, Calico Critters, miniature animal families)", 86823),
-    ("CCG Sealed Boxes (sealed card game booster box)", 261044),
-    ("CCG Sealed Packs (individual card packs)", 183456),
-    ("CCG Sealed Decks & Kits (starter deck)", 183457),
-    ("Other Preschool & Pretend Play (Pretty Cure, character toys for young children)", 19181),
-    # ─── Health & Beauty ───
-    ("Men's Razors (safety razor, double edge razor, manual razor)", 47921),
-    ("Men's Razor Blades (blade cartridge refills)", 47931),
-    ("Women's Razors", 178964),
-    ("Shaving & Grooming Kits & Sets (razor + stand set)", 106315),
-    ("Shaving Brushes & Mugs", 168191),
-    # ─── Kitchen / Home ───
-    ("Cling Film, Foil & Food Wraps (onigiri film, plastic wrap, aluminum foil)", 179206),
-    ("Food Storage Containers (lunch box, bento box)", 20655),
-    ("Food Storage Bags", 20653),
-    # ─── Cameras ───
-    ("Digital Cameras (mirrorless, compact, point-and-shoot)", 31388),
-    ("Digital Camera Parts & Accessories", 64352),
-    # ─── Video Games ───
-    ("Video Game Consoles (Nintendo Switch, PlayStation, Xbox console hardware)", 139971),
-    ("Video Games (game software, cartridge, disc)", 139973),
-    ("Video Game Controllers & Attachments (gamepad, Joy-Con, controller)", 117042),
-    ("Video Game Accessory Bundles", 171826),
-    ("Video Game Bags, Cases & Travel Cases", 171831),
-    ("Video Game Cables & Adapters", 171814),
-    ("Video Game Chargers & Charging Docks", 171858),
-    # ─── Tools ───
-    ("Hand Tools (wrenches, sockets, pliers)", 3469),
-    ("Power Tools", 122668),
-    # ─── Other ───
-    ("Sporting Goods", 888),
-    ("Books", 267),
-    ("Musical Instruments", 619),
-    ("Pet Supplies", 1281),
-]
+# CSVから商品タイトルに関連する葉カテゴリをキーワード検索
+_STOP_WORDS = {
+    "for", "the", "and", "with", "new", "set", "japanese", "japan", "from",
+    "inch", "cm", "mm", "size", "pack", "piece", "lot", "type", "made",
+    "high", "quality", "official", "original", "genuine", "product", "item",
+    "use", "used", "brand", "model", "color", "black", "white", "blue", "red",
+    "green", "silver", "gold", "pink", "clear",
+}
+
+def _search_csv_categories(title: str, brand: str = "", n: int = 40) -> list[tuple[str, int]]:
+    """
+    CSVの全葉カテゴリからタイトル・ブランドのキーワードに合致するものを検索。
+    スコア（一致キーワード数）上位n件を返す。
+    """
+    import re as _re
+    query = f"{title} {brand}"
+    words = set(_re.findall(r'[a-zA-Z]{3,}', query.lower()))
+    keywords = words - _STOP_WORDS
+    if not keywords:
+        return []
+
+    scored: list[tuple[int, int, str]] = []
+    for cat_id, info in EBAY_CATEGORY_DB.items():
+        if not info.get("is_leaf"):
+            continue
+        text = f"{info['name']} {info['path']}".lower()
+        score = sum(1 for kw in keywords if kw in text)
+        if score > 0:
+            scored.append((score, cat_id, f"{info['path']} > {info['name']}"))
+
+    scored.sort(key=lambda x: -x[0])
+    return [(label, cat_id) for _, cat_id, label in scored[:n]]
 
 
 EBAY_API_URL = "https://api.ebay.com/ws/api.dll"
@@ -302,12 +285,31 @@ class EbayLister:
             print(f"  ⚠️  画像なし（PictureDetailsをスキップ）")
         images_xml = "".join(f"<PictureURL>{url}</PictureURL>" for url in images_12)
 
-        title    = self._escape_xml(p["title"][:80])
-        price    = p["price_usd"]
-        cat_id   = p.get("category_id", EBAY_CATEGORY_MAP["default"])
-        cond_id  = self._condition_id(p.get("condition", "New"))
-        desc     = p["description"].replace("]]>", "]]]]><![CDATA[>")
-        upc  = p.get("upc", "Does not apply")
+        title       = self._escape_xml(p["title"][:80])
+        price       = p["price_usd"]
+        cat_id      = p.get("category_id", EBAY_CATEGORY_MAP["default"])
+        cond_id     = self._condition_id(p.get("condition", "New"))
+        desc        = p["description"].replace("]]>", "]]]]><![CDATA[>")
+        upc         = p.get("upc", "Does not apply")
+        stock_count = max(1, int(p.get("stock_count", 1)))
+
+        # ボリューム割引（在庫2個以上の場合）
+        volume_xml = ""
+        if stock_count >= 2:
+            p2 = round(price * 0.95, 2)
+            p3 = round(price * 0.92, 2)
+            p4 = round(price * 0.90, 2)
+            volume_xml = (
+                "<QuantityDiscount>"
+                "<DiscountName>ALL_INCLUSIVE</DiscountName>"
+                "<QuantityDiscountPrices>"
+                f"<QuantityDiscountPrice><MinQuantity>2</MinQuantity><Price currencyID=\"USD\">{p2}</Price></QuantityDiscountPrice>"
+                f"<QuantityDiscountPrice><MinQuantity>3</MinQuantity><Price currencyID=\"USD\">{p3}</Price></QuantityDiscountPrice>"
+                f"<QuantityDiscountPrice><MinQuantity>4</MinQuantity><Price currencyID=\"USD\">{p4}</Price></QuantityDiscountPrice>"
+                "</QuantityDiscountPrices>"
+                "</QuantityDiscount>"
+            )
+            print(f"  🏷️  ボリューム割引設定: 2個→{p2}$ / 3個→{p3}$ / 4個以上→{p4}$")
 
         xml = (
             '<?xml version="1.0" encoding="utf-8"?>'
@@ -330,8 +332,8 @@ class EbayLister:
             "<DispatchTimeMax>7</DispatchTimeMax>"
             "<ListingDuration>GTC</ListingDuration>"
             "<ListingType>FixedPriceItem</ListingType>"
-            "<Quantity>1</Quantity>"
-            "<SKU>" + str(upc) + "</SKU>"
+            f"<Quantity>{stock_count}</Quantity>"
+            + volume_xml +
             "<ShipToLocations>Worldwide</ShipToLocations>"
             "<ProductListingDetails>"
             f"<UPC>{upc}</UPC>"
@@ -414,13 +416,14 @@ class EbayLister:
 # eBayタイトルから最適カテゴリIDを自動取得
 # ──────────────────────────────────────────────────────────
 
-def get_best_category(token: str, title: str, jan_code: str = "", config: dict = None) -> int:
+def get_best_category(token: str, title: str, jan_code: str = "", config: dict = None,
+                      brand: str = "", product_type: str = "") -> int:
     """
     タイトル優先でeBayの最適葉カテゴリIDを自動取得
 
     優先順位:
-    1. タイトル → GetSuggestedCategories API（LeafCategoryのみ・CSVで検証）
-    2. Anthropic AI → CSVの葉カテゴリ候補から選択
+    1. タイトル → GetSuggestedCategories API（LeafCategoryのみ・信頼度40%以上・CSVで検証）
+    2. Anthropic AI → category_hints.md の葉カテゴリ候補から選択
     3. デフォルトカテゴリ
     """
     base_headers = {
@@ -449,16 +452,23 @@ def get_best_category(token: str, title: str, jan_code: str = "", config: dict =
             timeout=15,
         )
         if resp.status_code != 200:
+            print(f"  ⚠️  GetSuggestedCategories HTTPエラー: {resp.status_code}")
             return 0
         root = ET.fromstring(resp.text)
         ns = {"e": "urn:ebay:apis:eBLBaseComponents"}
         ack = root.findtext("e:Ack", namespaces=ns)
         if ack not in ("Success", "Warning"):
+            err = root.findtext(".//e:ShortMessage", namespaces=ns) or "不明"
+            print(f"  ⚠️  GetSuggestedCategories APIエラー: {ack} / {err}")
             return 0
 
         suggestions = root.findall(".//e:SuggestedCategory", ns)
+        if not suggestions:
+            print(f"  ⚠️  GetSuggestedCategories: 候補なし（クエリ: {query[:40]}）")
+            return 0
 
         # 葉カテゴリのみ対象（APIとCSV両方でLeaf確認）
+        PCT_THRESHOLD = 40  # これ未満の信頼度はAIに委ねる
         best_id, best_pct = None, -1
         for s in suggestions:
             cat_id_str = s.findtext("e:Category/e:CategoryID", namespaces=ns)
@@ -470,8 +480,22 @@ def get_best_category(token: str, title: str, jan_code: str = "", config: dict =
                     best_pct = pct
                     best_id  = cat_id_int
 
+        if not best_id:
+            # 候補はあるが全て非葉カテゴリ → 最初の候補IDをデバッグ表示
+            first = suggestions[0]
+            fid  = first.findtext("e:Category/e:CategoryID", namespaces=ns)
+            fname = first.findtext("e:Category/e:CategoryName", namespaces=ns)
+            fleaf = first.findtext("e:Category/e:LeafCategory", namespaces=ns)
+            print(f"  ⚠️  葉カテゴリ候補なし（例: {fid} {fname} leaf={fleaf}）→ AI判定へ")
+            return 0
+
+        if best_pct < PCT_THRESHOLD:
+            info = EBAY_CATEGORY_DB.get(best_id, {})
+            print(f"  ⚠️  API信頼度が低い（{best_pct}% < {PCT_THRESHOLD}%）: {best_id} {info.get('path', '')} → AI判定へ")
+            return 0
+
         # 非葉カテゴリは使わない（出品エラーの原因）
-        return best_id or 0
+        return best_id
 
     # Step 1: タイトルでGetSuggestedCategories
     query = title[:80].strip() or "Japan import goods"
@@ -485,49 +509,62 @@ def get_best_category(token: str, title: str, jan_code: str = "", config: dict =
     except Exception as e:
         print(f"  ⚠️  タイトルカテゴリ取得失敗: {e}")
 
-    # Step 2: Anthropic AI → CSVの葉カテゴリ候補から選択
+    # Step 2: CSV全体をキーワード検索 → 候補をAIに渡して最終判定
     _config = config or {}
     if _config.get("ANTHROPIC_API_KEY"):
         try:
-            category_hints = "\n".join(
-                f"- {name}: {cid}" for name, cid in _AI_CATEGORY_HINTS
-            )
-            valid_ids = {cid for _, cid in _AI_CATEGORY_HINTS}
-            prompt = (
-                f"You are an eBay category expert. Select the MOST SPECIFIC leaf category for this product.\n"
-                f"IMPORTANT: You MUST choose from the list below. Reply with ONLY the numeric ID.\n\n"
-                f"Product: {title}\n\n"
-                f"Leaf categories:\n{category_hints}\n\n"
-                f"Reply with ONLY the numeric category ID from the list above."
-            )
-            resp = requests.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={
-                    "Content-Type": "application/json",
-                    "x-api-key": _config.get("ANTHROPIC_API_KEY", ""),
-                    "anthropic-version": "2023-06-01",
-                },
-                json={"model": "claude-haiku-4-5-20251001", "max_tokens": 20,
-                      "messages": [{"role": "user", "content": prompt}]},
-                timeout=15,
-            )
-            data = resp.json()
-            if data.get("content"):
-                import re as _re
-                _raw = data["content"][0]["text"].strip()
-                _m = _re.search(r'\b(\d{4,6})\b', _raw)
-                if not _m:
-                    print(f"  ⚠️  AI返却値から数値を抽出できません: {_raw[:60]}")
-                    raise ValueError("no numeric category id found")
-                ai_cat_id = int(_m.group(1))
-                # リストにあるIDかつ葉カテゴリであることを確認
-                if ai_cat_id in valid_ids and is_leaf_category(ai_cat_id):
-                    info = EBAY_CATEGORY_DB.get(ai_cat_id, {})
-                    path = info.get("path", "")
-                    print(f"  🏷️  AIカテゴリ: {ai_cat_id}（{path}）")
-                    return ai_cat_id
-                else:
-                    print(f"  ⚠️  AI返却カテゴリ {ai_cat_id} は葉カテゴリ外 → スキップ")
+            # CSVからタイトル・ブランドで関連葉カテゴリを検索
+            csv_candidates = _search_csv_categories(title, brand=brand, n=40)
+            print(f"  🔍  CSV候補: {len(csv_candidates)}件")
+
+            if not csv_candidates:
+                print(f"  ⚠️  CSV候補なし → デフォルトへ")
+            else:
+                category_hints = "\n".join(
+                    f"- {label}: {cid}" for label, cid in csv_candidates
+                )
+                valid_ids = {cid for _, cid in csv_candidates}
+                extra = ""
+                if brand:
+                    extra += f"Brand: {brand}\n"
+                if product_type:
+                    extra += f"Product type hint: {product_type}\n"
+                prompt = (
+                    f"You are an eBay category expert. Select the MOST SPECIFIC leaf category for this product.\n"
+                    f"IMPORTANT: You MUST choose from the list below. Reply with ONLY the numeric ID.\n\n"
+                    f"Product title: {title}\n"
+                    f"{extra}\n"
+                    f"Candidate leaf categories (from eBay category database):\n{category_hints}\n\n"
+                    f"Think carefully about what the product physically IS. "
+                    f"Reply with ONLY the numeric category ID from the list above."
+                )
+                resp = requests.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={
+                        "Content-Type": "application/json",
+                        "x-api-key": _config.get("ANTHROPIC_API_KEY", ""),
+                        "anthropic-version": "2023-06-01",
+                    },
+                    json={"model": "claude-haiku-4-5-20251001", "max_tokens": 50,
+                          "messages": [{"role": "user", "content": prompt}]},
+                    timeout=15,
+                )
+                data = resp.json()
+                if data.get("content"):
+                    import re as _re
+                    _raw = data["content"][0]["text"].strip()
+                    _m = _re.search(r'\b(\d{4,6})\b', _raw)
+                    if not _m:
+                        print(f"  ⚠️  AI返却値から数値を抽出できません: {_raw[:60]}")
+                        raise ValueError("no numeric category id found")
+                    ai_cat_id = int(_m.group(1))
+                    if ai_cat_id in valid_ids and is_leaf_category(ai_cat_id):
+                        info = EBAY_CATEGORY_DB.get(ai_cat_id, {})
+                        path = info.get("path", "")
+                        print(f"  🏷️  AIカテゴリ（CSV検索）: {ai_cat_id}（{path}）")
+                        return ai_cat_id
+                    else:
+                        print(f"  ⚠️  AI返却カテゴリ {ai_cat_id} は候補外 → スキップ")
         except Exception as e:
             print(f"  ⚠️  AIカテゴリ取得失敗: {e}")
 
@@ -542,7 +579,7 @@ def get_best_category(token: str, title: str, jan_code: str = "", config: dict =
 
 def translate_title_for_ebay(japanese_title: str, brand: str = "", model: str = "") -> str:
     """
-    日本語タイトルをeBay Cassiniアルゴリズム最適化済み英語タイトルに変換
+    日本語タイトルをeBay Cassiniアルゴリズム最適化済み英語タイトルに変換（80文字フル活用）
 
     2026年eBay SEOロジック（Cassiniアルゴリズム対応）:
     1. Brand + Model を先頭に配置（最重要キーワードを前半に）
@@ -552,27 +589,7 @@ def translate_title_for_ebay(japanese_title: str, brand: str = "", model: str = 
     5. 買い手が検索する自然な言葉を使用
     6. 具体的スペック・互換性・カテゴリ属性を含む
     """
-    prompt = f"""You are an eBay SEO expert. Convert this Japanese product title to an optimized English eBay listing title.
-
-STRICT RULES (2026 Cassini Algorithm):
-1. Start with Brand name and Model number (most important keywords first)
-2. Use EXACTLY 80 characters or as close as possible (every character = ranking opportunity)
-3. Include: Brand + Model + Key Feature + Condition/Type + Specs
-4. NO filler words: WOW, Amazing, Look, Nice, Great, L@@K, !!!
-5. NO keyword stuffing or repetition
-6. Use natural buyer search language (how buyers actually search)
-7. Include compatibility info if applicable (e.g. "for iPhone 15")
-8. Add "New" at end if space allows
-9. Use Title Case
-
-Product info:
-- Japanese title: {japanese_title}
-- Brand: {brand or "extract from title"}
-- Model: {model or "extract from title"}
-
-Reply with ONLY the optimized English title. Nothing else. No quotes."""
-
-    try:
+    def _call_title_api(prompt_text: str) -> str:
         resp = requests.post(
             "https://api.anthropic.com/v1/messages",
             headers={
@@ -582,22 +599,66 @@ Reply with ONLY the optimized English title. Nothing else. No quotes."""
             },
             json={
                 "model": "claude-haiku-4-5-20251001",
-                "max_tokens": 120,
-                "messages": [{"role": "user", "content": prompt}]
+                "max_tokens": 150,
+                "messages": [{"role": "user", "content": prompt_text}]
             },
             timeout=15,
         )
         data = resp.json()
         if data.get("content"):
-            translated = data["content"][0]["text"].strip().strip('"').strip("'")[:80]
-            print(f"  🌐 SEO最適化タイトル: {translated} ({len(translated)}文字)")
-            return translated
+            return data["content"][0]["text"].strip().strip('"').strip("'")[:80]
+        return ""
+
+    prompt = f"""You are an eBay SEO title expert. Convert this Japanese product to an English eBay title.
+
+CRITICAL REQUIREMENT: Your title MUST be 78-80 characters long. Count every character carefully.
+Every unused character is a lost ranking opportunity in eBay Cassini search.
+
+RULES:
+1. Brand + Model number first (highest search weight)
+2. Fill remaining space with: dimensions, capacity, material, color, quantity, compatibility, product type synonyms buyers actually search
+3. "Japanese" is OK only if it genuinely describes the product style/origin (e.g. "Japanese Hand Saw", "Japanese Pruning Shears") — never as padding
+4. NEVER use "New", "Japan" as filler — eBay has a Condition field; these waste characters
+5. NO: WOW, Amazing, Look, L@@K, !!!, keyword repetition
+6. Title Case
+
+Product info:
+- Japanese title: {japanese_title}
+- Brand: {brand or "extract from title"}
+- Model: {model or "extract from title"}
+
+TARGET: exactly 80 characters (hard max). Aim for 78-80.
+EXAMPLE of good 80-char title: "Pilot G2 07 Retractable Gel Ink Fine Point 0.7mm Black Ballpoint Pen 12 Pack Set"
+
+Reply with ONLY the title. No quotes. No explanation."""
+
+    try:
+        title = _call_title_api(prompt)
+        if not title:
+            return japanese_title[:80]
+
+        # 75文字未満なら拡張リトライ（1回）
+        if len(title) < 75:
+            expand_prompt = f"""This eBay title is only {len(title)} characters. Expand it to 78-80 characters by adding relevant keywords, specs, or synonyms. Do NOT exceed 80 characters.
+
+Current title ({len(title)} chars): {title}
+
+Product: {japanese_title}
+Brand: {brand or "N/A"} | Model: {model or "N/A"}
+
+Add keywords like: material, dimensions, color, compatibility, quantity, product type synonyms. Do NOT add "New" or "Japan" as filler.
+Reply with ONLY the expanded title. No quotes."""
+            expanded = _call_title_api(expand_prompt)
+            if expanded and len(expanded) > len(title):
+                title = expanded
+
+        print(f"  🌐 SEO最適化タイトル: {title} ({len(title)}文字)")
+        return title
+
     except Exception as e:
         print(f"  ⚠️  タイトル翻訳失敗: {e}")
 
-    import re
-    fallback = re.sub(r'[^\x00-\x7F]+', ' ', japanese_title).strip()[:80]
-    return fallback or japanese_title[:80]
+    return japanese_title[:80]
 
 def build_listing_data(asin: str, keepa_data: dict, config: dict) -> dict:
     """
@@ -624,11 +685,15 @@ def build_listing_data(asin: str, keepa_data: dict, config: dict) -> dict:
     description = build_description(keepa_data, amazon_price)
 
     upc = keepa_data.get("upc", "Does not apply")
-    mpn = keepa_data.get("mpn", "Does Not Apply")
+    _mpn_raw = keepa_data.get("mpn", "") or ""
+    # "-" や空文字・リスト文字列など無効値はeBayが拒否するため "Does Not Apply" に正規化
+    _mpn_invalid = ("", "-", "N/A", "n/a", "[]", "[[]]", "Does Not Apply")
+    mpn = _mpn_raw if _mpn_raw and str(_mpn_raw).strip() not in _mpn_invalid else "Does Not Apply"
 
     # カテゴリを先に決定（Item Specifics生成に活用するため）
     jan_code    = keepa_data.get("upc", "") or ""
-    category_id = get_best_category(config["EBAY_TOKEN"], title, jan_code=jan_code, config=config)
+    category_id = get_best_category(config["EBAY_TOKEN"], title, jan_code=jan_code, config=config,
+                                     brand=brand or "", product_type=keepa_data.get("product_group", ""))
     cat_path    = EBAY_CATEGORY_DB.get(category_id, {}).get("path", "")
 
     item_specifics = {}
@@ -641,13 +706,26 @@ def build_listing_data(asin: str, keepa_data: dict, config: dict) -> dict:
     # Anthropic APIでItem Specificsを自動生成（カテゴリ情報を含む）
     try:
         import requests as _req, json as _json
+        _ccg_hint = ""
+        if category_id in {261044, 261068, 183454, 2536}:
+            _ccg_hint = ' Include "Set" (the card game set/expansion name), "Game" (e.g. Weiss Schwarz), "Language".'
+        if category_id in {172513, 64352, 15200, 182084, 31388, 48749}:
+            _ccg_hint = ' Include "Compatible Brand" (brand this accessory is compatible with), "Type", "Model".'
+        if category_id in {71307, 122668, 175702, 42017, 631, 20068, 233}:
+            _ccg_hint = ' Include "Battery Included" (Yes/No), "Voltage", "Power Source", "Type".'
+        _headphone_cats = {14985, 112529, 184904, 33963, 293, 61882}
+        _is_headphone = category_id in _headphone_cats or any(w in cat_path for w in ("Headphone", "Earphone", "Earbud"))
+        if _is_headphone:
+            _ccg_hint = ' REQUIRED: include "Connectivity" (value: "Wired" or "Wireless"). Also include "Driver Unit", "Impedance", "Type", "Color".'
+        if category_id in {262304, 262305, 262306, 262307, 262308, 262309, 262310, 262311, 262312, 262313, 262314, 262315, 262316, 45} or "Railroads & Trains" in cat_path:
+            _ccg_hint = ' Include "Gauge" (N/HO/Z/G/O/OO/TT), "Scale", "Brand", "Type".'
         _prompt = (
             f"You are an eBay listing expert. Generate Item Specifics for this product.\n"
             f"eBay Category: {cat_path}\n"
             f"Product: {title}\nBrand: {brand or 'N/A'}\nModel: {mpn or 'N/A'}\n"
             f"Generate ONLY a JSON object with relevant eBay Item Specifics for this category.\n"
             f"Include fields the category may require (Type, Color, Material, Size, Features, Theme, "
-            f"Age Group, Item Width, Item Length, Unit Type, Units per Lot, etc.)\n"
+            f"Age Group, Item Width, Item Length, Item Height, Unit Type, Units per Lot, etc.){_ccg_hint}\n"
             f"Max 12 fields. No markdown. Example: {{\"Type\": \"Figure\", \"Color\": \"Multi-Color\"}}"
         )
         _resp = _req.post(
@@ -676,11 +754,71 @@ def build_listing_data(asin: str, keepa_data: dict, config: dict) -> dict:
     _w = keepa_data.get("width_cm", 0) or 0
     _l = keepa_data.get("length_cm", 0) or 0
     _h = keepa_data.get("height_cm", 0) or 0
-    if category_id == 179206:  # Cling Film, Foil & Food Wraps: Width・Length必須
+
+    # 寸法が必須なカテゴリ群（Kitchen/Home/Storage等）
+    _dim_required_cats = {179206, 20655, 20654, 20656, 26677, 72}
+    if category_id in _dim_required_cats:
         if "Item Width" not in item_specifics and _w:
             item_specifics["Item Width"] = f"{_w} cm"
         if "Item Length" not in item_specifics and _l:
             item_specifics["Item Length"] = f"{_l} cm"
+        if "Item Height" not in item_specifics and _h:
+            item_specifics["Item Height"] = f"{_h} cm"
+
+    # カメラ・パーツ系カテゴリ: "Compatible Brand" が必須
+    _compat_brand_cats = {172513, 64352, 15200, 182084, 31388, 48749}
+    if category_id in _compat_brand_cats and "Compatible Brand" not in item_specifics:
+        item_specifics["Compatible Brand"] = brand or "Does Not Apply"
+
+    # 電動工具カテゴリ: "Battery Included" が必須
+    _power_tool_cats = {71307, 122668, 175702, 42017, 631, 20068, 233}
+    if category_id in _power_tool_cats and "Battery Included" not in item_specifics:
+        # タイトルにバッテリー・充電器の記述があればYes、なければNo
+        _title_lower = title.lower()
+        _has_battery = any(w in _title_lower for w in ("battery", "charger", "cordless", "コードレス"))
+        item_specifics["Battery Included"] = "Yes" if _has_battery else "No"
+
+    # 鉄道模型カテゴリ: "Gauge" が必須（カテゴリパスで判定）
+    _railroad_cats = {262304, 262305, 262306, 262307, 262308, 262309, 262310, 262311, 262312, 262313, 262314, 262315, 262316, 45}
+    _is_railroad = category_id in _railroad_cats or "Model Railroad" in cat_path or "Railroads & Trains" in cat_path
+    if _is_railroad and "Gauge" not in item_specifics:
+        import re as _re
+        _gauge_map = {
+            r"\bN\s*(?:scale|gauge|ゲージ)\b": "N",
+            r"\bHO\s*(?:scale|gauge|ゲージ)\b": "HO",
+            r"\bZ\s*(?:scale|gauge|ゲージ)\b": "Z",
+            r"\bG\s*(?:scale|gauge|ゲージ)\b": "G",
+            r"\bO\s*(?:scale|gauge|ゲージ)\b": "O",
+            r"\bOO\s*(?:scale|gauge)\b": "OO",
+            r"\bTT\s*(?:scale|gauge)\b": "TT",
+        }
+        _gauge_val = None
+        _search_text = f"{title} {keepa_data.get('title', '')}"
+        for pattern, gauge in _gauge_map.items():
+            if _re.search(pattern, _search_text, _re.IGNORECASE):
+                _gauge_val = gauge
+                break
+        item_specifics["Gauge"] = _gauge_val or "N"  # 不明時はNスケールをデフォルト
+
+    # ヘッドホンカテゴリ: "Connectivity" が必須
+    _headphone_cats = {14985, 112529, 184904, 33963, 293, 61882}
+    _is_headphone = category_id in _headphone_cats or any(w in cat_path for w in ("Headphone", "Earphone", "Earbud"))
+    if _is_headphone and "Connectivity" not in item_specifics:
+        _title_lower = title.lower()
+        _wireless_kw = ("wireless", "bluetooth", "bt ", "true wireless", "tws", "nfc", "wifi", "wi-fi")
+        _is_wireless = any(w in _title_lower for w in _wireless_kw)
+        item_specifics["Connectivity"] = "Wireless" if _is_wireless else "Wired"
+
+    # CCGカテゴリ: "Set"フィールドが必須
+    _ccg_cats = {261044, 261068, 183454, 2536}
+    if category_id in _ccg_cats and "Set" not in item_specifics:
+        # 英語タイトルからSet名を抽出（ブランド・商品種別ワードを除去）
+        import re as _re
+        _remove_words = r"\b(Bushiroad|Weiss Schwarz|Weiß Schwarz|Booster|Box|Pack|Sealed|New|TCG|CCG|Card Game|Trading Card)\b"
+        _set_candidate = _re.sub(_remove_words, "", title, flags=_re.IGNORECASE).strip(" -|/")
+        _set_candidate = _re.sub(r"\s+", " ", _set_candidate).strip()
+        if _set_candidate:
+            item_specifics["Set"] = _set_candidate[:65]
 
     return {
         "asin":           asin,
@@ -692,6 +830,7 @@ def build_listing_data(asin: str, keepa_data: dict, config: dict) -> dict:
         "condition":      "New",
         "item_specifics": item_specifics,
         "upc":            upc,
+        "stock_count":    keepa_data.get("stock_count", 1),
     }
 
 
@@ -762,24 +901,9 @@ Use inline CSS for styling. Keep total under 800 words. Reply with ONLY the HTML
             print(f"  📝 SEO説明文生成完了（{len(html)}文字）")
             return html
     except Exception as e:
-        print(f"  ⚠️  説明文生成失敗: {e}")
+        raise RuntimeError(f"説明文生成失敗: {e}") from e
 
-    # フォールバック
-    return f"""
-<div style="font-family:Arial,sans-serif;max-width:800px;line-height:1.6;">
-  <h3>About This Item</h3>
-  <table border="1" cellpadding="8" style="border-collapse:collapse;width:100%;">
-    <tr><td><b>Brand</b></td><td>{brand}</td></tr>
-    <tr><td><b>Model</b></td><td>{model or "See title"}</td></tr>
-    <tr><td><b>Condition</b></td><td>Brand New</td></tr>
-    <tr><td><b>Origin</b></td><td>Japan</td></tr>
-    <tr><td><b>Rating</b></td><td>{rating}/5 ({reviews} reviews on Amazon Japan)</td></tr>
-  </table>
-  <h3>Shipping from Japan</h3>
-  <p>✅ Ships directly from Japan | ✅ Tracking provided | ✅ 7-14 business days</p>
-  <p><small>Import duties may apply in your country.</small></p>
-</div>
-"""
+    raise RuntimeError("説明文生成失敗: APIレスポンスが空")
 
 
 def calc_sell_price(amazon_price_jpy: float, config: dict, weight_kg: float = 1.0,
@@ -788,9 +912,10 @@ def calc_sell_price(amazon_price_jpy: float, config: dict, weight_kg: float = 1.
     from shipping_calculator import get_shipping_jpy
     shipping_jpy = get_shipping_jpy(weight_kg, destination="US48",
                                     length_cm=length_cm, width_cm=width_cm, height_cm=height_cm)
-    total_cost_jpy = amazon_price_jpy + shipping_jpy
-    usd = total_cost_jpy / config["JPY_TO_USD"]
-    usd = usd / (1 - config["EBAY_FEE_RATE"])
+    # 関税は売上に対して適用（eBay手数料と同様に売値から差し引く）
+    product_usd  = amazon_price_jpy / config["JPY_TO_USD"]
+    shipping_usd = shipping_jpy / config["JPY_TO_USD"]
+    usd = (product_usd + shipping_usd) / (1 - config["EBAY_FEE_RATE"] - config["TARIFF_RATE"])
     usd = usd / (1 - config["TARGET_MARGIN"])
     print(f"  📦 送料: ¥{shipping_jpy:,}（{weight_kg}kg → US48）")
     return round(usd, 2)
@@ -858,7 +983,18 @@ def fetch_listing_details(keepa_api, asin: str) -> dict:
                 price = prices[-1]
                 break
         in_stock = price > 0
-        print(f"  💴 取得価格: ¥{price:,.0f} / 在庫: {'あり' if in_stock else 'なし'}")
+
+        # 在庫数取得（Keepa stock=1 パラメータで取得）
+        # availabilityAmazon: -1=出品なし, 0=在庫あり, 1=一時的品切, 2=在庫なし, 4=予約商品
+        avail = p.get("availabilityAmazon", -1)
+        raw_stock = p.get("stock")  # Keepaが返す在庫数（整数 or None）
+        if isinstance(raw_stock, (int, float)) and raw_stock >= 2:
+            stock_count = int(min(raw_stock, 10))  # 最大10個でキャップ
+        elif avail == 0 and in_stock:
+            stock_count = 1  # 在庫あり確認だが数量不明 → 安全に1
+        else:
+            stock_count = 1
+        print(f"  💴 取得価格: ¥{price:,.0f} / 在庫: {'あり' if in_stock else 'なし'} / 数量: {stock_count}")
         print(f"    トークン残: {data.get('tokensLeft', 'N/A')}")
 
         upc_list = p.get("upcList") or []
@@ -867,9 +1003,10 @@ def fetch_listing_details(keepa_api, asin: str) -> dict:
         model    = p.get("model") or ""
 
         upc = ean_list[0] if ean_list else (upc_list[0] if upc_list else "Does not apply")
-        raw_mpn = part_num or model or ""
-        # 数字のみ（JAN/EAN/UPCコード）はMPNとして無効なので除外
-        mpn = raw_mpn if (raw_mpn and not raw_mpn.isdigit()) else "Does Not Apply"
+        raw_mpn = str(part_num or model or "").strip()
+        # 数字のみ（JAN/EAN/UPCコード）・リスト文字列など無効値はMPNとして除外
+        _mpn_invalid = ("", "-", "N/A", "n/a", "[]", "[[]]")
+        mpn = raw_mpn if raw_mpn and raw_mpn not in _mpn_invalid and not raw_mpn.isdigit() else "Does Not Apply"
 
         # 重量・寸法（Keepa: 重量はg、寸法はmm）
         pkg_weight_g  = p.get("packageWeight") or 0   # グラム
@@ -895,6 +1032,7 @@ def fetch_listing_details(keepa_api, asin: str) -> dict:
             "image_urls":    image_urls,
             "current_price": price,
             "in_stock":      in_stock,
+            "stock_count":   stock_count,
             "rating":        (p.get("avgRating") or 0) / 10,
             "review_count":  p.get("reviewCount", 0),
             "upc":           upc,

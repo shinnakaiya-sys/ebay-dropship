@@ -73,133 +73,162 @@ def main():
 
     alerts = []  # 要対応アラートを収集
 
-    for i, product in enumerate(products):
-        asin        = product["ASIN"]
-        ebay_id     = product["eBay商品ID"]
-        base_price_raw = product.get("仕入れ基準価格", "")
-        if not str(base_price_raw).strip():
+    try:
+        for i, product in enumerate(products):
+            asin        = product["ASIN"]
+            ebay_id     = product["eBay商品ID"]
+            base_price_raw = product.get("仕入れ基準価格", "")
+            if not str(base_price_raw).strip():
+                print(f"\n[{i+1}/{len(products)}] {product['商品名'][:40]}...")
+                print(f"  ⚠️  仕入れ基準価格が未入力のためスキップ")
+                continue
+            base_price  = float(base_price_raw)
+            # 商品ごとの下限価格（空欄=グローバル設定を使用）
+            min_price_raw = product.get("下限価格(USD)", "")
+            product_min_price = float(min_price_raw) if str(min_price_raw).strip() else None
+
+            # 商品ごとの利益率（空欄=設定シートのグローバル値を使用）
+            margin_raw = product.get("利益率", "")
+            product_config = CONFIG.copy()
+            if str(margin_raw).strip():
+                try:
+                    product_config["TARGET_MARGIN"] = float(str(margin_raw).strip())
+                    print(f"  📊 利益率: {product_config['TARGET_MARGIN']*100:.1f}%（商品個別設定）")
+                except ValueError:
+                    pass
             print(f"\n[{i+1}/{len(products)}] {product['商品名'][:40]}...")
-            print(f"  ⚠️  仕入れ基準価格が未入力のためスキップ")
-            continue
-        base_price  = float(base_price_raw)
-        # 商品ごとの下限価格（空欄=グローバル設定を使用）
-        min_price_raw = product.get("下限価格(USD)", "")
-        product_min_price = float(min_price_raw) if str(min_price_raw).strip() else None
 
-        # 商品ごとの利益率（空欄=設定シートのグローバル値を使用）
-        margin_raw = product.get("利益率", "")
-        product_config = CONFIG.copy()
-        if str(margin_raw).strip():
-            try:
-                product_config["TARGET_MARGIN"] = float(str(margin_raw).strip())
-                print(f"  📊 利益率: {product_config['TARGET_MARGIN']*100:.1f}%（商品個別設定）")
-            except ValueError:
-                pass
-        print(f"\n[{i+1}/{len(products)}] {product['商品名'][:40]}...")
+            # トークン残量チェック（1商品分なければ中断）
+            if keepa.tokens_left < MIN_TOKENS_CHECK:
+                print(f"  ⚠️  Keepaトークン不足（残: {keepa.tokens_left}）→ 残り商品をスキップ")
+                break
 
-        # トークン残量チェック（1商品分なければ中断）
-        if keepa.tokens_left < MIN_TOKENS_CHECK:
-            print(f"  ⚠️  Keepaトークン不足（残: {keepa.tokens_left}）→ 残り商品をスキップ")
-            break
+            # ──────────────────────────────────────
+            # 1. Keepa: Amazon価格・在庫チェック
+            # ──────────────────────────────────────
+            keepa_data = keepa.check(asin)
 
-        # ──────────────────────────────────────
-        # 1. Keepa: Amazon価格・在庫チェック
-        # ──────────────────────────────────────
-        keepa_data = keepa.check(asin)
+            if keepa_data.get("error"):
+                print(f"  ⚠️  Keepaエラーのためスキップ（在庫状態を変更しません）")
+                continue
 
-        if keepa_data.get("error"):
-            print(f"  ⚠️  Keepaエラーのためスキップ（在庫状態を変更しません）")
-            continue
+            amazon_price    = keepa_data["current_price"]
+            amazon_in_stock = keepa_data["in_stock"]
+            price_changed   = abs(amazon_price - base_price) / base_price > CONFIG["PRICE_CHANGE_THRESHOLD"]
 
-        amazon_price    = keepa_data["current_price"]
-        amazon_in_stock = keepa_data["in_stock"]
-        price_changed   = abs(amazon_price - base_price) / base_price > CONFIG["PRICE_CHANGE_THRESHOLD"]
+            # Sheetsに記録
+            sheets.log_price(asin, "amazon", amazon_price, amazon_in_stock)
 
-        # Sheetsに記録
-        sheets.log_price(asin, "amazon", amazon_price, amazon_in_stock)
+            # ──────────────────────────────────────
+            # 2. eBay: 現在の出品状態チェック
+            # ──────────────────────────────────────
+            ebay_data           = ebay.check(ebay_id)
+            ebay_price          = ebay_data["current_price"]
+            ebay_active         = ebay_data["is_active"]
+            ebay_qty            = ebay_data["quantity"]
+            ebay_listing_status = ebay_data["listing_status"]
+            # 購入者から見て有効な出品 = Active かつ 在庫数 > 0
+            ebay_available      = ebay_active and ebay_qty > 0
 
-        # ──────────────────────────────────────
-        # 2. eBay: 現在の出品状態チェック
-        # ──────────────────────────────────────
-        ebay_data           = ebay.check(ebay_id)
-        ebay_price          = ebay_data["current_price"]
-        ebay_active         = ebay_data["is_active"]
-        ebay_qty            = ebay_data["quantity"]
-        ebay_listing_status = ebay_data["listing_status"]
-        # 購入者から見て有効な出品 = Active かつ 在庫数 > 0
-        ebay_available      = ebay_active and ebay_qty > 0
+            # Sheetsに記録
+            sheets.log_price(asin, "ebay", ebay_price, ebay_active)
 
-        # Sheetsに記録
-        sheets.log_price(asin, "ebay", ebay_price, ebay_active)
-
-        # 計算売値・eBay価格ズレを事前算出
-        new_price = calc_sell_price(amazon_price, product_config, min_price=product_min_price)
-        ebay_price_stale = (
-            ebay_price > 0
-            and abs(ebay_price - new_price) / new_price > CONFIG["PRICE_CHANGE_THRESHOLD"]
-        )
-        time.sleep(0.5)  # APIレートリミット対策
-
-        # ──────────────────────────────────────
-        # 4. 判定ロジック
-        # ──────────────────────────────────────
-
-        # ケース①: Amazon在庫切れ → eBay出品停止（既に在庫0なら何もしない）
-        if not amazon_in_stock and ebay_available:
-            ebay.end_listing(ebay_id)
-            sheets.update_status(asin, "在庫切れ停止")
-            alerts.append({
-                "type": "⛔ 在庫切れ",
-                "asin": asin,
-                "ebay_id": ebay_id,
-                "message": "Amazon在庫切れ → eBay在庫数0に更新",
-                "product": product.get("商品名", "")[:40],
-            })
-            print(f"  ⛔ 在庫切れ → eBay在庫数0に更新")
-            continue
-
-        if not amazon_in_stock and not ebay_available:
-            # 既に在庫0停止済み → シートステータスだけ合わせる
-            sheets.update_status(asin, "在庫切れ停止")
-            print(f"  ⛔ 在庫切れ（既に停止済み）")
-            continue
-
-        # ケース②: Amazon在庫あり かつ eBayが非表示（Active+在庫0）または終了済み
-        if amazon_in_stock and not ebay_available:
+            # 計算売値・eBay価格ズレを事前算出
             new_price = calc_sell_price(amazon_price, product_config, min_price=product_min_price)
-            ebay.restore_listing(ebay_id, ebay_listing_status, new_price)
-            sheets.update_status(asin, "出品中")
-            alerts.append({
-                "type": "✅ 在庫復活",
-                "asin": asin,
-                "ebay_id": ebay_id,
-                "message": f"在庫復活 → eBay復活 ${new_price}",
-                "product": product["商品名"][:40],
-            })
-            print(f"  ✅ 在庫復活 → eBay出品復活（{ebay_listing_status}）")
-            continue
+            ebay_price_stale = (
+                ebay_price > 0
+                and abs(ebay_price - new_price) / new_price > CONFIG["PRICE_CHANGE_THRESHOLD"]
+            )
+            time.sleep(0.5)  # APIレートリミット対策
 
-        # ケース③: Amazon価格変動 or eBay価格ズレ → eBay価格更新
-        if amazon_in_stock and ebay_available and (price_changed or ebay_price_stale):
-            ebay.revise_price(ebay_id, new_price)
+            # ──────────────────────────────────────
+            # 3. 競合最安値・出品数チェック（Browse API）
+            # ──────────────────────────────────────
+            _jan   = str(product.get("JANコード", "") or "").strip()
+            _app   = CONFIG.get("EBAY_APP_ID", "")
+            _sec   = CONFIG.get("EBAY_CLIENT_SECRET", "")
+            if _jan and _app and _sec:
+                rival = ebay.get_jp_search_stats(
+                    jan_code      = _jan,
+                    seller_id     = CONFIG.get("EBAY_SELLER_ID", ""),
+                    app_id        = _app,
+                    client_secret = _sec,
+                    product_name  = product.get("商品名", ""),
+                )
+                sheets.update_rival_price(asin, rival["lowest_price"], rival["count"])
+                if rival.get("my_rank") is not None:
+                    sheets.update_my_rank(asin, rival["my_rank"])
+                print(f"  🏆 競合: 最安値 ${rival['lowest_price']} / {rival['count']}件 / 順位: {rival['my_rank']}")
+                time.sleep(1)  # Browse APIレート制限対策
+
+            # ──────────────────────────────────────
+            # 4. 判定ロジック
+            # ──────────────────────────────────────
+
+            # ケース①: Amazon在庫切れ → eBay出品停止（既に在庫0なら何もしない）
+            if not amazon_in_stock and ebay_available:
+                ebay.end_listing(ebay_id)
+                sheets.update_status(asin, "在庫切れ停止")
+                alerts.append({
+                    "type": "⛔ 在庫切れ",
+                    "asin": asin,
+                    "ebay_id": ebay_id,
+                    "message": "Amazon在庫切れ → eBay在庫数0に更新",
+                    "product": product.get("商品名", "")[:40],
+                })
+                print(f"  ⛔ 在庫切れ → eBay在庫数0に更新")
+                continue
+
+            if not amazon_in_stock and not ebay_available:
+                # 既に在庫0停止済み → シートステータスだけ合わせる
+                sheets.update_status(asin, "在庫切れ停止")
+                print(f"  ⛔ 在庫切れ（既に停止済み）")
+                continue
+
+            # ケース②: Amazon在庫あり かつ eBayが非表示（Active+在庫0）または終了済み
+            if amazon_in_stock and not ebay_available:
+                new_price = calc_sell_price(amazon_price, product_config, min_price=product_min_price)
+                ebay.restore_listing(ebay_id, ebay_listing_status, new_price)
+                sheets.update_status(asin, "出品中")
+                alerts.append({
+                    "type": "✅ 在庫復活",
+                    "asin": asin,
+                    "ebay_id": ebay_id,
+                    "message": f"在庫復活 → eBay復活 ${new_price}",
+                    "product": product["商品名"][:40],
+                })
+                print(f"  ✅ 在庫復活 → eBay出品復活（{ebay_listing_status}）")
+                continue
+
+            # ケース③: Amazon価格変動 or eBay価格ズレ → eBay価格更新
+            if amazon_in_stock and ebay_available and (price_changed or ebay_price_stale):
+                ebay.revise_price(ebay_id, new_price)
+                sheets.update_price(asin, amazon_price, new_price)
+                if price_changed:
+                    reason = f"Amazon価格変動 ¥{base_price:,.0f}→¥{amazon_price:,.0f}"
+                else:
+                    reason = f"eBay価格ズレ(${ebay_price}→${new_price})"
+                alerts.append({
+                    "type": "💰 価格変動",
+                    "asin": asin,
+                    "ebay_id": ebay_id,
+                    "message": f"{reason} → eBay更新: ${new_price}",
+                    "product": product["商品名"][:40],
+                })
+                print(f"  💰 {reason} → eBay: ${new_price}")
+                continue
+
             sheets.update_price(asin, amazon_price, new_price)
-            reason = "Amazon価格変動" if price_changed else f"eBay価格ズレ(${ebay_price}→${new_price})"
-            alerts.append({
-                "type": "💰 価格変動",
-                "asin": asin,
-                "ebay_id": ebay_id,
-                "message": f"{reason} → eBay更新: ${new_price}",
-                "product": product["商品名"][:40],
-            })
-            print(f"  💰 {reason} → eBay価格更新")
-            continue
+            print(f"  ✔  変動なし（Amazon: ¥{amazon_price} / eBay: ${new_price} / 在庫: {'あり' if amazon_in_stock else 'なし'}）")
+            time.sleep(0.5)  # API制限対策
 
-        sheets.update_price(asin, amazon_price, new_price)
-        print(f"  ✔  変動なし（Amazon: ¥{amazon_price} / 在庫: {'あり' if amazon_in_stock else 'なし'}）")
-        time.sleep(0.5)  # API制限対策
+    except Exception as e:
+        print(f"\n⚠️  予期しないエラー（処理中断）: {e}")
+        import traceback
+        traceback.print_exc()
 
     # ──────────────────────────────────────
-    # 4. アラート通知 & サマリー記録
+    # 4. アラート通知 & サマリー記録（例外が出ても必ず実行）
     # ──────────────────────────────────────
     if alerts:
         notifier.send(alerts)
