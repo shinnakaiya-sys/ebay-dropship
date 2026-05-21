@@ -17,6 +17,9 @@ import time
 import gspread
 from google.oauth2.service_account import Credentials
 from datetime import datetime
+from zoneinfo import ZoneInfo
+
+_JST = ZoneInfo("Asia/Tokyo")
 
 
 def _col_letter(n: int) -> str:
@@ -61,14 +64,14 @@ MASTER_COLS = [
     "eBay売値(USD)",   # F
     "ステータス",      # G  出品中 / 在庫切れ停止 / 無効
     "最終チェック日",  # H
-    "登録日",          # I
-    "メモ",            # J
-    "下限価格(USD)",   # K  空欄=グローバル設定を使用
-    "競合最安値(USD)", # L  日本発送セラーの最安値（送料込み）
-    "競合出品数",      # M
-    "利益率",          # N  空欄=設定シートのグローバル値を使用（例: 0.05 = 5%）
-    "最安値順URL",     # O  JANコード検索・最安値順のeBay URL
-    "自分の順位",      # P  最安値順で自分のアカウントが何番目か
+    "下限価格(USD)",   # I  空欄=グローバル設定を使用
+    "競合最安値(USD)", # J  日本発送セラーの最安値（送料込み）
+    "競合出品数",      # K
+    "利益率",          # L  空欄=設定シートのグローバル値を使用（例: 0.05 = 5%）
+    "最安値順URL",     # M  JANコード検索・最安値順のeBay URL
+    "自分の順位",      # N  最安値順で自分のアカウントが何番目か
+    "登録日",          # O
+    "メモ",            # P
 ]
 
 # 出品待ちリストのカラム定義
@@ -159,14 +162,14 @@ class SheetsManager:
         ws = self.sheet.worksheet(SHEET_MASTER)
         cell = self._find_asin_cell(ws, asin)
         if cell:
-            today = datetime.now().strftime("%Y-%m-%d %H:%M")
+            today = datetime.now(_JST).strftime("%Y-%m-%d %H:%M")
             ws.update_cell(cell.row, 8, today)
 
     def update_status(self, asin: str, status: str):
         ws = self.sheet.worksheet(SHEET_MASTER)
         cell = self._find_asin_cell(ws, asin)
         if cell:
-            today = datetime.now().strftime("%Y-%m-%d %H:%M")
+            today = datetime.now(_JST).strftime("%Y-%m-%d %H:%M")
             ws.update_cell(cell.row, 7, status)   # G列: ステータス
             ws.update_cell(cell.row, 8, today)     # H列: 最終チェック日
 
@@ -177,7 +180,7 @@ class SheetsManager:
         ws = self.sheet.worksheet(SHEET_MASTER)
         cell = self._find_asin_cell(ws, asin)
         if cell:
-            today = datetime.now().strftime("%Y-%m-%d %H:%M")
+            today = datetime.now(_JST).strftime("%Y-%m-%d %H:%M")
             ws.update_cell(cell.row, 5, amazon_price)  # E列: 仕入れ基準価格
             ws.update_cell(cell.row, 6, ebay_price)    # F列: eBay売値
             ws.update_cell(cell.row, 8, today)          # H列: 最終チェック日
@@ -187,7 +190,7 @@ class SheetsManager:
     # ──────────────────────────────────────────────────────
     def log_price(self, asin: str, platform: str, price: float, in_stock: bool):
         ws = self.sheet.worksheet(SHEET_PRICE)
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = datetime.now(_JST).strftime("%Y-%m-%d")
         row = [today, asin, platform, price, "在庫あり" if in_stock else "在庫なし"]
         for attempt in range(3):
             try:
@@ -206,7 +209,7 @@ class SheetsManager:
         if not alerts:
             return
         ws = self.sheet.worksheet(SHEET_ALERT)
-        now = datetime.now().strftime("%Y-%m-%d %H:%M")
+        now = datetime.now(_JST).strftime("%Y-%m-%d %H:%M")
         rows = [
             [now, a["type"], a["asin"], a["ebay_id"], a["product"], a["message"]]
             for a in alerts
@@ -226,7 +229,7 @@ class SheetsManager:
     # ──────────────────────────────────────────────────────
     def write_summary(self, total: int, alerts: list[dict]):
         ws = self.sheet.worksheet(SHEET_SUMMARY)
-        now = datetime.now().strftime("%Y-%m-%d %H:%M")
+        now = datetime.now(_JST).strftime("%Y-%m-%d %H:%M")
         out_of_stock = sum(1 for a in alerts if "在庫切れ" in a["type"])
         price_update  = sum(1 for a in alerts if "価格変動" in a["type"])
         relist        = sum(1 for a in alerts if "在庫復活" in a["type"])
@@ -256,7 +259,7 @@ class SheetsManager:
     # ──────────────────────────────────────────────────────
     def add_pending(self, asin: str, memo: str = ""):
         ws = self.sheet.worksheet(SHEET_PENDING)
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = datetime.now(_JST).strftime("%Y-%m-%d")
         ws.append_row([asin, "待機中", today, memo])
         print(f"  ➕ 出品待ちに追加: {asin}")
 
@@ -267,36 +270,39 @@ class SheetsManager:
                     base_price: float, ebay_price: float, memo: str = "",
                     jan_code: str = ""):
         ws = self.sheet.worksheet(SHEET_MASTER)
-        today = datetime.now().strftime("%Y-%m-%d")
-        ws.append_row([
+        today = datetime.now(_JST).strftime("%Y-%m-%d")
+        row_data = [
             jan_code, asin, ebay_id, name, base_price, ebay_price,
-            "出品中", today, today, memo
-        ])
+            "出品中", today, "", "", "", "", "", "", today, memo
+        ]
+        # append_row はスパースな行があると列位置がずれるため、A列末尾を明示取得
+        next_row = len(ws.col_values(1)) + 1
+        end_col = _col_letter(len(row_data))
+        ws.update(f"A{next_row}:{end_col}{next_row}", [row_data])
         print(f"  ➕ 商品追加: {name[:40]}")
 
     # ──────────────────────────────────────────────────────
     # ヘルパー
     # ──────────────────────────────────────────────────────
     def update_my_rank(self, asin: str, rank):
-        """自分の順位をP列（16列目）に更新"""
+        """自分の順位をN列（14列目）に更新"""
         ws = self.sheet.worksheet(SHEET_MASTER)
         cell = self._find_asin_cell(ws, asin)
         if cell:
-            ws.update_cell(cell.row, 16, rank if rank is not None else "")  # P列
+            ws.update_cell(cell.row, 14, rank if rank is not None else "")  # N列
 
     def update_rival_price(self, asin: str, lowest_price: float, count: int):
-        """競合最安値・競合出品数を更新（L・M列）"""
+        """競合最安値を更新（J列のみ）"""
         ws = self.sheet.worksheet(SHEET_MASTER)
         cell = self._find_asin_cell(ws, asin)
         if cell:
-            ws.update_cell(cell.row, 12, lowest_price if lowest_price > 0 else "")  # L列
-            ws.update_cell(cell.row, 13, count)                                      # M列
+            ws.update_cell(cell.row, 10, lowest_price if lowest_price > 0 else "")  # J列
 
     def _find_asin_cell(self, ws, asin: str):
         """B列（ASIN）またはA列（JANコード）から検索してセルを返す"""
         try:
             # B列（ASIN）で検索
-            cell = ws.find(asin, in_column=1)
+            cell = ws.find(asin, in_column=2)
             if cell:
                 return cell
         except Exception:
