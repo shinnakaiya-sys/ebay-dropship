@@ -292,11 +292,12 @@ class SheetsManager:
             ws.update_cell(cell.row, 14, rank if rank is not None else "")  # N列
 
     def update_rival_price(self, asin: str, lowest_price: float, count: int):
-        """競合最安値を更新（J列のみ）"""
+        """競合最安値・競合出品数を更新（J・K列）"""
         ws = self.sheet.worksheet(SHEET_MASTER)
         cell = self._find_asin_cell(ws, asin)
         if cell:
             ws.update_cell(cell.row, 10, lowest_price if lowest_price > 0 else "")  # J列
+            ws.update_cell(cell.row, 11, count)                                      # K列
 
     def _find_asin_cell(self, ws, asin: str):
         """B列（ASIN）またはA列（JANコード）から検索してセルを返す"""
