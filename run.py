@@ -26,6 +26,7 @@ os.environ["TQDM_DISABLE"] = "1"
 sys.stdout.reconfigure(line_buffering=True)
 
 import time
+import random
 from datetime import datetime
 from config import CONFIG
 from keepa_checker import KeepaChecker
@@ -60,7 +61,9 @@ def main():
     # Keepaトークンチェック（商品数 × 最低必要トークン）
     from keepa_checker import MIN_TOKENS_CHECK
     products = sheets.get_active_products()
-    print(f"\n📋 管理商品数: {len(products)} 件")
+    # 最終チェック日が古い順に並べ替え（前回スキップされた商品を優先）
+    products.sort(key=lambda p: p.get("最終チェック日", "") or "")
+    print(f"\n📋 管理商品数: {len(products)} 件（最終チェック日が古い順で処理）")
 
     required = len(products) * MIN_TOKENS_CHECK
     if keepa.tokens_left < required:
