@@ -245,17 +245,38 @@ class EbayLister:
         """
         xml_body = self._build_add_item_xml(product, sku=sku)
 
-        try:
-            resp = requests.post(
-                EBAY_API_URL,
-                headers={**self.headers, "X-EBAY-API-CALL-NAME": "AddItem"},
-                data=xml_body.encode("utf-8"),
-                timeout=30,
-            )
-            return self._parse_add_item_response(resp.text)
+        for attempt in range(1, 4):  # 最大3回リトライ
+            try:
+                resp = requests.post(
+                    EBAY_API_URL,
+                    headers={**self.headers, "X-EBAY-API-CALL-NAME": "AddItem"},
+                    data=xml_body.encode("utf-8"),
+                    timeout=30,
+                )
+                result = self._parse_add_item_response(resp.text)
 
-        except Exception as e:
-            return {"success": False, "item_id": "", "message": str(e)}
+                # 必須Item Specificが不足している場合は "No" で補完してリトライ
+                missing = result.get("missing_specifics", [])
+                if not result["success"] and missing and attempt < 3:
+                    for field in missing:
+                        product.setdefault("item_specifics", {})[field] = "No"
+                        print(f"  🔧 必須Item Specific補完: {field} = No → リトライ")
+                    xml_body = self._build_add_item_xml(product, sku=sku)
+                    continue
+
+                # System error（一時的エラー）はリトライ
+                if not result["success"] and "system error" in result["message"].lower() and attempt < 3:
+                    print(f"  ⚠️  System error → {attempt}回目リトライ（{attempt * 5}秒後）")
+                    time.sleep(attempt * 5)
+                    continue
+                return result
+            except Exception as e:
+                if attempt < 3:
+                    print(f"  ⚠️  リクエストエラー → リトライ ({attempt}): {e}")
+                    time.sleep(attempt * 5)
+                else:
+                    return {"success": False, "item_id": "", "message": str(e)}
+        return {"success": False, "item_id": "", "message": "リトライ上限に達しました"}
 
     # ──────────────────────────────────────────────────────
     # AddItem XML を構築
@@ -271,19 +292,18 @@ class EbayLister:
                 "</NameValueList>"
             )
 
-        # 画像URL（最大12枚）
-        # 画像を最大12枚になるまで繰り返し挿入
-        raw_images = [url for url in p.get("image_urls", []) if url]
-        print(f"  🖼️  取得画像数: {len(raw_images)}枚")
-        if raw_images:
-            # 12枚になるまで繰り返す
-            import itertools
-            images_12 = list(itertools.islice(itertools.cycle(raw_images), 12))
-            print(f"  🖼️  送信画像数（繰り返し後）: {len(images_12)}枚")
-        else:
-            images_12 = []
+        # 画像URL（最大12枚・重複なし）
+        seen = set()
+        raw_images = []
+        for url in p.get("image_urls", []):
+            if url and url not in seen:
+                seen.add(url)
+                raw_images.append(url)
+        images_to_send = raw_images[:12]
+        print(f"  🖼️  取得画像数: {len(p.get('image_urls', []))}枚 → 送信: {len(images_to_send)}枚（重複除去）")
+        if not images_to_send:
             print(f"  ⚠️  画像なし（PictureDetailsをスキップ）")
-        images_xml = "".join(f"<PictureURL>{url}</PictureURL>" for url in images_12)
+        images_xml = "".join(f"<PictureURL>{url}</PictureURL>" for url in images_to_send)
 
         title       = self._escape_xml(p["title"][:80])
         price       = p["price_usd"]
@@ -381,14 +401,28 @@ class EbayLister:
                     "message": f"出品成功（手数料: ${fees}）",
                 }
             else:
-                # 詳細エラーを全て表示
+                # 詳細エラーを全て表示（Warning系は除外して実害エラーのみ抽出）
                 errors_short = root.findall(".//e:ShortMessage", ns)
                 errors_long  = root.findall(".//e:LongMessage", ns)
+                error_codes  = root.findall(".//e:ErrorCode", ns)
                 msgs = []
-                for s, l in zip(errors_short, errors_long):
-                    msgs.append(f"{s.text} | {l.text}")
+                missing_specifics: list[str] = []
+                import re as _re2
+                for s, l, c in zip(errors_short, errors_long, error_codes):
+                    # 文字化け除去（非標準スペース U+00C2 A0 等）
+                    short = (s.text or "").replace("\u00c2\u00a0", " ").replace("\u00a0", " ").strip()
+                    long_  = (l.text or "").replace("\u00c2\u00a0", " ").replace("\u00a0", " ").strip()
+                    code   = (c.text or "").strip()
+                    msgs.append(f"[{code}] {short}")
+                    print(f"    eBayエラー {code}: {long_}")
+                    # 必須Item Specificの不足を検出して自動補完リトライ用に返す
+                    if code == "21919303":
+                        _m = _re2.search(r"The item specific (.+?) is missing", long_)
+                        if _m:
+                            missing_specifics.append(_m.group(1).strip())
                 msg = " / ".join(msgs) if msgs else "不明なエラー"
-                return {"success": False, "item_id": "", "message": msg}
+                return {"success": False, "item_id": "", "message": msg,
+                        "missing_specifics": missing_specifics}
 
         except Exception as e:
             return {"success": False, "item_id": "", "message": f"レスポンス解析エラー: {e}"}
@@ -809,16 +843,26 @@ def build_listing_data(asin: str, keepa_data: dict, config: dict) -> dict:
         _is_wireless = any(w in _title_lower for w in _wireless_kw)
         item_specifics["Connectivity"] = "Wireless" if _is_wireless else "Wired"
 
-    # CCGカテゴリ: "Set"フィールドが必須
+    # CCGカテゴリ: "Set" / "Franchise" / "Game" フィールドが必須
     _ccg_cats = {261044, 261068, 183454, 2536}
-    if category_id in _ccg_cats and "Set" not in item_specifics:
-        # 英語タイトルからSet名を抽出（ブランド・商品種別ワードを除去）
+    if category_id in _ccg_cats:
         import re as _re
         _remove_words = r"\b(Bushiroad|Weiss Schwarz|Weiß Schwarz|Booster|Box|Pack|Sealed|New|TCG|CCG|Card Game|Trading Card)\b"
-        _set_candidate = _re.sub(_remove_words, "", title, flags=_re.IGNORECASE).strip(" -|/")
-        _set_candidate = _re.sub(r"\s+", " ", _set_candidate).strip()
-        if _set_candidate:
-            item_specifics["Set"] = _set_candidate[:65]
+        if "Set" not in item_specifics:
+            _set_candidate = _re.sub(_remove_words, "", title, flags=_re.IGNORECASE).strip(" -|/")
+            _set_candidate = _re.sub(r"\s+", " ", _set_candidate).strip()
+            item_specifics["Set"] = (_set_candidate or brand or "Does Not Apply")[:65]
+        if "Franchise" not in item_specifics:
+            # ブランドをFranchise（IP名）として使用
+            item_specifics["Franchise"] = (brand or "Does Not Apply")[:65]
+        if "Game" not in item_specifics:
+            item_specifics["Game"] = "Weiss Schwarz"
+
+    # おもちゃ・ゲームカテゴリ全般: "Franchise"が必須なケースに対応
+    _toy_cats = {220, 246, 19071, 3034, 4082, 19169}
+    if category_id in _toy_cats or "Toys & Hobbies" in cat_path:
+        if "Franchise" not in item_specifics:
+            item_specifics["Franchise"] = (brand or "Does Not Apply")[:65]
 
     return {
         "asin":           asin,
@@ -893,6 +937,9 @@ Use inline CSS for styling. Keep total under 800 words. Reply with ONLY the HTML
             timeout=30,
         )
         data = resp.json()
+        if resp.status_code != 200 or data.get("type") == "error":
+            err = data.get("error", data)
+            raise RuntimeError(f"説明文生成失敗: HTTP {resp.status_code} / {err}")
         if data.get("content"):
             html = data["content"][0]["text"].strip()
             # コードブロックを除去
@@ -900,6 +947,8 @@ Use inline CSS for styling. Keep total under 800 words. Reply with ONLY the HTML
                 html = html.split("\n", 1)[1].rsplit("```", 1)[0]
             print(f"  📝 SEO説明文生成完了（{len(html)}文字）")
             return html
+    except RuntimeError:
+        raise
     except Exception as e:
         raise RuntimeError(f"説明文生成失敗: {e}") from e
 
@@ -951,9 +1000,13 @@ def fetch_listing_details(keepa_api, asin: str) -> dict:
 
         p = products[0]
 
-        # 画像URL生成
+        # 画像URL生成（images 配列 → imagesCSV カンマ区切り → 両方を試みる）
         image_urls = []
         images = p.get("images") or []
+        if not images:
+            images_csv = p.get("imagesCSV", "") or ""
+            if images_csv:
+                images = [s.strip() for s in images_csv.split(",") if s.strip()]
         for img in images[:12]:
             if isinstance(img, dict):
                 img_id = img.get("m") or img.get("l") or ""
@@ -969,10 +1022,10 @@ def fetch_listing_details(keepa_api, asin: str) -> dict:
         # 商品特徴
         features = p.get("features", []) or []
 
-        # 現在価格: 新品最安値(csv[1])優先 → Amazon直販(csv[0])
+        # 現在価格: 新品最安値(csv[1])優先 → Amazon直販(csv[0]) → Buy Box(csv[18])
         csv = p.get("csv", []) or []
         price = 0
-        for idx in [1, 0, 3]:  # 新品最安値優先
+        for idx in [1, 0, 18, 3]:  # 新品最安値優先、Buy Boxも参照
             if idx >= len(csv):
                 continue
             series = csv[idx]
@@ -982,11 +1035,9 @@ def fetch_listing_details(keepa_api, asin: str) -> dict:
             if prices:
                 price = prices[-1]
                 break
-        in_stock = price > 0
-
-        # 在庫数取得（Keepa stock=1 パラメータで取得）
         # availabilityAmazon: -1=出品なし, 0=在庫あり, 1=一時的品切, 2=在庫なし, 4=予約商品
         avail = p.get("availabilityAmazon", -1)
+        in_stock = price > 0 or avail == 0  # 価格が取れなくてもavail=0なら在庫あり
         raw_stock = p.get("stock")  # Keepaが返す在庫数（整数 or None）
         if isinstance(raw_stock, (int, float)) and raw_stock >= 2:
             stock_count = int(min(raw_stock, 10))  # 最大10個でキャップ

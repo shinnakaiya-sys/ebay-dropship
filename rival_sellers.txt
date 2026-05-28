@@ -1,0 +1,81 @@
+# rival_sellers.txt - ライバルセラーリスト
+# フォーマット: seller_id,account_name
+# account_name は kozuki / kaworu / dbz のいずれか
+# #から始まる行はコメント
+#
+# 例:
+# akibashipping,kozuki
+# tokyoelectronics,kaworu
+
+japan-ssdyuk
+japancosmetics0710
+yorozu_japan
+gotuo7
+samuraisoul142142
+duck_shop_japan
+the_big_dipper_japan
+oohanabijapan
+akibashipping
+nyankichi2009
+keisuke1193
+sacchan2008
+goodlifeyourlife
+step-f
+arigatou-japan
+samuraisellercooljapanc.t
+saitoh320622
+riversideworks_japan
+kabukicatjapan
+japan-fuji-store
+ktakuya2012
+yokamonmarket
+best-price-japon
+alletatjapan
+otouta_86
+premium-japan
+yryo_35
+samurai_electronics
+gott-japan
+hello_from_japan
+tenpurasamurai_tps
+msk301
+blueoce-0
+japandesignlove
+paintingtool_japan
+7daysmart
+mikenekodo_japan
+yorozuya_japan_store
+t09028_93
+jatoyo
+kaikai37
+nippontrain
+stand_29
+nice-good-japan
+rockman8829
+japan_inari
+# ume*huksui  ← セラーID要確認（*の部分が不明）
+
+mmk-ec
+yufuji66
+orangelab.0320
+mtrade_third_store
+t09028-4
+ogogo-1
+card-japan777
+maruyoshop
+yasumori.no33wk
+kaijufromjapan
+motivation_middle
+grandlinejapan
+ryoishikawa_77
+japangifukinka
+generate_00
+sakon3464
+shoppalpal
+japanuniverse
+lahood_japan1
+nicology_jp
+crosss-65
+japanorld
+raou644
+

@@ -117,13 +117,22 @@ class KeepaChecker:
             best_price = new_min_price or amazon_price or 0
 
             # 在庫判定: 最新エントリが正の値かどうかで判断（-1=在庫切れ）
-            in_stock = (
-                self._is_currently_in_stock(csv, 18) or  # Buy Box
-                self._is_currently_in_stock(csv, 0)  or  # Amazon直販
-                self._is_currently_in_stock(csv, 1)       # 新品最安値
-            )
+            # availabilityAmazon: 0=在庫あり, 1=一時的品切, 2=在庫なし, -1=出品なし
+            avail = p.get("availabilityAmazon", -1)
+            bb_stock   = self._is_currently_in_stock(csv, 18)
+            amz_stock  = self._is_currently_in_stock(csv, 0)
+            new_stock  = self._is_currently_in_stock(csv, 1)
+            # avail=1(一時的品切)は価格履歴があれば在庫ありとみなす
+            avail_ok   = avail in (0, 1) and (new_min_price > 0 or amazon_price > 0 or buy_box_price > 0)
+            in_stock = bb_stock or amz_stock or new_stock or avail == 0 or avail_ok
 
             print(f"    Buy Box: {buy_box_price}円 / Amazon直販: {amazon_price}円 / 新品最安値: {new_min_price}円 / 在庫: {'あり' if in_stock else 'なし'}")
+            if not in_stock:
+                print(f"    [在庫判定詳細] BuyBox={bb_stock} Amazon={amz_stock} 新品最安={new_stock} availabilityAmazon={avail}")
+                bb_raw  = (csv[18][-1] if len(csv) > 18 and csv[18] else "N/A")
+                amz_raw = (csv[0][-1]  if len(csv) > 0  and csv[0]  else "N/A")
+                new_raw = (csv[1][-1]  if len(csv) > 1  and csv[1]  else "N/A")
+                print(f"    [CSVラスト値] BuyBox={bb_raw} Amazon={amz_raw} 新品最安={new_raw}")
 
             return {
                 "asin":          asin,

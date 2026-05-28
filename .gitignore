@@ -34,3 +34,9 @@ Thumbs.db
 # ログ・一時ファイル
 *.log
 *.tmp
+
+# Selenium セッション・キャッシュ
+ebay_session/
+ebay_session_*/
+.wdm/
+debug_*.png

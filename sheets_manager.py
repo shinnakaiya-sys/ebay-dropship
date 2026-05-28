@@ -240,10 +240,11 @@ class SheetsManager:
     # 出品待ちリスト: 取得
     # ──────────────────────────────────────────────────────
     def get_pending_products(self) -> list[dict]:
-        """ステータスが「待機中」の商品を返す（JANコード対応）"""
+        """ステータスが「待機中」または「スキップ（在庫なし）」の商品を返す（JANコード対応）"""
         ws = self.sheet.worksheet(SHEET_PENDING)
         records = ws.get_all_records()
-        return [r for r in records if r.get("ステータス") == "待機中" and r.get("JANコード")]
+        retryable = {"待機中", "スキップ（在庫なし）"}
+        return [r for r in records if r.get("ステータス") in retryable and r.get("JANコード")]
 
     # ──────────────────────────────────────────────────────
     # 出品待ちリスト: ステータス更新
