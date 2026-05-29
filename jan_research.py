@@ -44,7 +44,7 @@ except ImportError:
 # ==========================================
 # 設定
 # ==========================================
-CLIENT_ID      = os.getenv("EBAY_CLIENT_ID", "")
+CLIENT_ID      = os.getenv("EBAY_CLIENT_ID") or os.getenv("EBAY_APP_ID", "")
 CLIENT_SECRET  = os.getenv("EBAY_CLIENT_SECRET", "")
 SPREADSHEET_ID = "1GEGnGQtb5Fb76W9Nyd5gGM-igQAe1-U9-W2nmhVjaB8"
 TAB_NAME       = "新品リサーチ"

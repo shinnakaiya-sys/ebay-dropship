@@ -18,7 +18,7 @@ import os, sys, time, re, base64, subprocess, requests
 from dotenv import load_dotenv
 
 load_dotenv(".env.kaworu" if os.path.exists(".env.kaworu") else ".env")
-CLIENT_ID     = os.getenv("EBAY_CLIENT_ID", "")
+CLIENT_ID     = os.getenv("EBAY_CLIENT_ID") or os.getenv("EBAY_APP_ID", "")
 CLIENT_SECRET = os.getenv("EBAY_CLIENT_SECRET", "")
 
 BASE_DIR       = os.path.dirname(os.path.abspath(__file__))
