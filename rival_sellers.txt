@@ -54,7 +54,7 @@ nice-good-japan
 rockman8829
 japan_inari
 # ume*huksui  ← セラーID要確認（*の部分が不明）
-
+fukuwarai-japan
 mmk-ec
 yufuji66
 orangelab.0320
@@ -78,4 +78,5 @@ nicology_jp
 crosss-65
 japanorld
 raou644
+wa-wonders-jpn
 
