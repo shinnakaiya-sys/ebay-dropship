@@ -68,16 +68,39 @@ def create_driver():
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--lang=en-US")
+    options.add_argument("--window-size=1920,1080")
+    options.add_argument(
+        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    )
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
+    options.add_experimental_option("prefs", {"intl.accept_languages": "en-US,en"})
 
     if HEADLESS:
         options.add_argument("--headless=new")
-        options.add_argument("--window-size=1920,1080")
         options.add_argument("--disable-gpu")
     else:
         profile_path = os.path.join(BASE_DIR, "ebay_session")
         options.add_argument(f"--user-data-dir={profile_path}")
 
-    return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+
+    try:
+        from selenium_stealth import stealth
+        stealth(driver,
+                languages=["en-US", "en"],
+                vendor="Google Inc.",
+                platform="Win32",
+                webgl_vendor="Intel Inc.",
+                renderer="Intel Iris OpenGL Engine",
+                fix_hairline=True)
+    except ImportError:
+        pass
+
+    return driver
 
 
 def scrape_sold_items(seller_id, max_items):
