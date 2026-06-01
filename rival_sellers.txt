@@ -26,13 +26,13 @@ samuraisellercooljapanc.t
 saitoh320622
 riversideworks_japan
 kabukicatjapan
+sakura-japan-net
 japan-fuji-store
 ktakuya2012
 yokamonmarket
 best-price-japon
 alletatjapan
 otouta_86
-premium-japan
 yryo_35
 samurai_electronics
 gott-japan
@@ -79,4 +79,5 @@ crosss-65
 japanorld
 raou644
 wa-wonders-jpn
-
+premium-japan
+sonosakey

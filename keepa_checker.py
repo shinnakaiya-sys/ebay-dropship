@@ -122,13 +122,18 @@ class KeepaChecker:
             bb_stock   = self._is_currently_in_stock(csv, 18)
             amz_stock  = self._is_currently_in_stock(csv, 0)
             new_stock  = self._is_currently_in_stock(csv, 1)
+            any_price  = new_min_price > 0 or amazon_price > 0 or buy_box_price > 0
             # avail=1(一時的品切)は価格履歴があれば在庫ありとみなす
-            avail_ok   = avail in (0, 1) and (new_min_price > 0 or amazon_price > 0 or buy_box_price > 0)
-            in_stock = bb_stock or amz_stock or new_stock or avail == 0 or avail_ok
+            avail_ok   = avail in (0, 1) and any_price
+            # avail=2(Amazon在庫なし)でも新品最安値あり = サードパーティに在庫あり
+            third_party_ok = avail == 2 and new_min_price > 0
+            # KeepaのCSV最終値が-1でも直近の価格履歴があればBuyBox在庫ありとみなす
+            bb_price_ok = buy_box_price > 0 and avail >= 0
+            in_stock = bb_stock or amz_stock or new_stock or avail == 0 or avail_ok or third_party_ok or bb_price_ok
 
             print(f"    Buy Box: {buy_box_price}円 / Amazon直販: {amazon_price}円 / 新品最安値: {new_min_price}円 / 在庫: {'あり' if in_stock else 'なし'}")
             if not in_stock:
-                print(f"    [在庫判定詳細] BuyBox={bb_stock} Amazon={amz_stock} 新品最安={new_stock} availabilityAmazon={avail}")
+                print(f"    [在庫判定詳細] BuyBox={bb_stock} Amazon={amz_stock} 新品最安={new_stock} avail={avail} third_party_ok={third_party_ok} bb_price_ok={bb_price_ok}")
                 bb_raw  = (csv[18][-1] if len(csv) > 18 and csv[18] else "N/A")
                 amz_raw = (csv[0][-1]  if len(csv) > 0  and csv[0]  else "N/A")
                 new_raw = (csv[1][-1]  if len(csv) > 1  and csv[1]  else "N/A")
