@@ -138,10 +138,17 @@ def main():
 
             # 計算売値・eBay価格ズレを事前算出
             new_price = calc_sell_price(amazon_price, product_config, min_price=product_min_price)
+            floor = product_min_price if product_min_price is not None else CONFIG.get("MIN_SELL_PRICE_USD", 0)
+            ebay_price_below_floor = bool(floor) and ebay_price > 0 and ebay_price < floor
             ebay_price_stale = (
                 ebay_price > 0
-                and abs(ebay_price - new_price) / new_price > CONFIG["PRICE_CHANGE_THRESHOLD"]
+                and (
+                    abs(ebay_price - new_price) / new_price > CONFIG["PRICE_CHANGE_THRESHOLD"]
+                    or ebay_price_below_floor
+                )
             )
+            if ebay_price_below_floor:
+                print(f"  ⚠️  現在のeBay価格 ${ebay_price} が下限 ${floor} を下回っています → 補正対象")
             time.sleep(0.5)  # APIレートリミット対策
 
             # ──────────────────────────────────────

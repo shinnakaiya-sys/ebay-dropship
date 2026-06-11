@@ -720,8 +720,8 @@ def build_listing_data(asin: str, keepa_data: dict, config: dict) -> dict:
 
     upc = keepa_data.get("upc", "Does not apply")
     _mpn_raw = keepa_data.get("mpn", "") or ""
-    # "-" や空文字・リスト文字列など無効値はeBayが拒否するため "Does Not Apply" に正規化
-    _mpn_invalid = ("", "-", "N/A", "n/a", "[]", "[[]]", "Does Not Apply")
+    # "-" や空文字・記号のみ・リスト文字列など無効値はeBayが拒否するため "Does Not Apply" に正規化
+    _mpn_invalid = ("", "-", ".", "N/A", "n/a", "[]", "[[]]", "Does Not Apply")
     mpn = _mpn_raw if _mpn_raw and str(_mpn_raw).strip() not in _mpn_invalid else "Does Not Apply"
 
     # カテゴリを先に決定（Item Specifics生成に活用するため）
@@ -967,6 +967,10 @@ def calc_sell_price(amazon_price_jpy: float, config: dict, weight_kg: float = 1.
     usd = (product_usd + shipping_usd) / (1 - config["EBAY_FEE_RATE"] - config["TARIFF_RATE"])
     usd = usd / (1 - config["TARGET_MARGIN"])
     print(f"  📦 送料: ¥{shipping_jpy:,}（{weight_kg}kg → US48）")
+    floor = config.get("MIN_SELL_PRICE_USD", 0)
+    if floor and usd < floor:
+        print(f"  ⚠️  計算売値 ${usd:.2f} < 下限 ${floor} → 下限価格を適用")
+        usd = floor
     return round(usd, 2)
 
 
@@ -1055,8 +1059,8 @@ def fetch_listing_details(keepa_api, asin: str) -> dict:
 
         upc = ean_list[0] if ean_list else (upc_list[0] if upc_list else "Does not apply")
         raw_mpn = str(part_num or model or "").strip()
-        # 数字のみ（JAN/EAN/UPCコード）・リスト文字列など無効値はMPNとして除外
-        _mpn_invalid = ("", "-", "N/A", "n/a", "[]", "[[]]")
+        # 数字のみ（JAN/EAN/UPCコード）・リスト文字列・記号のみなど無効値はMPNとして除外
+        _mpn_invalid = ("", "-", ".", "N/A", "n/a", "[]", "[[]]")
         mpn = raw_mpn if raw_mpn and raw_mpn not in _mpn_invalid and not raw_mpn.isdigit() else "Does Not Apply"
 
         # 重量・寸法（Keepa: 重量はg、寸法はmm）
