@@ -32,7 +32,8 @@ import base64
 import requests
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta, timezone
-from dotenv import dotenv_values
+from dotenv import dotenv_values, load_dotenv
+load_dotenv()
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 try:
@@ -146,7 +147,7 @@ def get_usd_jpy_rate() -> float:
         )
         return float(resp.json()["rates"]["JPY"])
     except:
-        return 150.0  # API失敗時のフォールバック
+        return 155.0  # API失敗時のフォールバック
 
 
 # ==========================================
@@ -340,43 +341,117 @@ def get_keepa_info(jan: str, api_key: str) -> tuple[str | None, str | None, str 
 # ==========================================
 # Step 3: eBay Active Listings 最安値取得
 # ==========================================
-def get_ebay_active_lowest(jan: str, token: str) -> tuple[float, str]:
-    """
-    新品かつ最安値のeBay出品価格(USD)と出品URLを返す。
-    GTINで見つからない場合はキーワード検索にフォールバック。
-    """
-    url     = "https://api.ebay.com/buy/browse/v1/item_summary/search"
-    headers = {"Authorization": f"Bearer {token}"}
+def _ascii_keywords(title: str) -> str:
+    """日本語タイトルからASCII英数字トークンを抽出してeBay検索用文字列を返す。"""
+    tokens = re.findall(r"[A-Za-z0-9][A-Za-z0-9+\-\.]*", title)
+    tokens = [t for t in tokens if len(t) >= 2]
+    return " ".join(tokens[:8])
 
-    # GTINで検索（新品・最安値順）
-    params = {
-        "gtin":   jan,
-        "filter": "conditions:{NEW}",
-        "sort":   "price",
-        "limit":  "5",
-    }
+
+def _create_ebay_driver():
+    """Step 3専用ヘッドレスドライバー（eBay公開検索・認証不要）"""
+    from selenium import webdriver
+    from selenium.webdriver.chrome.service import Service
+    from selenium.webdriver.chrome.options import Options
+    from webdriver_manager.chrome import ChromeDriverManager
+    os.environ.setdefault("WDM_LOCAL", "1")
+    options = Options()
+    options.add_argument("--headless=new")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--window-size=1920,1080")
+    options.add_argument("--lang=en-US")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument(
+        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    )
+    options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
+    options.add_experimental_option("useAutomationExtension", False)
+    options.add_experimental_option("prefs", {"intl.accept_languages": "en-US,en"})
+    driver = webdriver.Chrome(
+        service=Service(ChromeDriverManager().install()), options=options)
     try:
-        resp  = requests.get(url, headers=headers, params=params, timeout=10)
-        items = resp.json().get("itemSummaries", [])
+        from selenium_stealth import stealth
+        stealth(driver, languages=["en-US", "en"], vendor="Google Inc.",
+                platform="Win32", webgl_vendor="Intel Inc.",
+                renderer="Intel Iris OpenGL Engine", fix_hairline=True)
+    except ImportError:
+        pass
+    return driver
 
-        # GTINで見つからない場合はキーワード検索
+
+def _ebay_search_lowest(driver, keyword: str, debug: bool = False) -> tuple[float, str]:
+    """eBay検索ページから新品最安値(USD)とURLをSeleniumでスクレイピング。"""
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from urllib.parse import quote_plus
+    url = (f"https://www.ebay.com/sch/i.html"
+           f"?_nkw={quote_plus(keyword)}&_sacat=0&_from=R40&_trksid=m570.l1313"
+           f"&LH_PrefLoc=2&_sop=15")
+    try:
+        driver.get(url)
+        try:
+            WebDriverWait(driver, 8).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "li.s-item"))
+            )
+        except Exception:
+            pass
+        items = driver.find_elements(By.CSS_SELECTOR, "li.s-item")
         if not items:
-            params2 = {
-                "q":      jan,
-                "filter": "conditions:{NEW}",
-                "sort":   "price",
-                "limit":  "5",
-            }
-            resp  = requests.get(url, headers=headers, params=params2, timeout=10)
-            items = resp.json().get("itemSummaries", [])
-
-        if items:
-            item      = items[0]
-            price_val = float(item.get("price", {}).get("value", 0))
-            item_url  = item.get("itemWebUrl", "")
-            return price_val, item_url
+            if debug:
+                screenshot_path = f"/tmp/ebay_debug_{keyword[:20].replace(' ', '_')}.png"
+                driver.save_screenshot(screenshot_path)
+                print(f"           [eBay DEBUG] スクリーンショット保存: {screenshot_path}")
+                print(f"           [eBay DEBUG] ページタイトル: {driver.title}")
+            print(f"           [eBay] 検索結果なし（キーワード: {keyword[:40]}）")
+            return 0.0, ""
+        for item in items:
+            # eBayの先頭ダミー行（"Shop on eBay"）をスキップ
+            link_els = item.find_elements(By.CSS_SELECTOR, "a.s-item__link")
+            if link_els:
+                href = link_els[0].get_attribute("href") or ""
+                if "itm/123456" in href or not href:
+                    continue
+            price_els = item.find_elements(By.CSS_SELECTOR, ".s-item__price")
+            if not price_els:
+                continue
+            m = re.search(r"\$(\d[\d,]*\.?\d*)", price_els[0].text)
+            if not m:
+                continue
+            price_usd = float(m.group(1).replace(",", ""))
+            if price_usd <= 0:
+                continue
+            item_url = link_els[0].get_attribute("href") if link_els else ""
+            return price_usd, item_url or ""
     except Exception as e:
-        print(f"  [eBay Browse API] エラー: {e}")
+        print(f"  [eBay Selenium] エラー: {e}")
+    return 0.0, ""
+
+
+def get_ebay_active_lowest(jan: str, ebay_driver, title_kw: str = "") -> tuple[float, str]:
+    """
+    新品かつ最安値のeBay出品価格(USD)と出品URLをSeleniumで取得。
+    検索順: ① JAN番号キーワード → ② 商品名英数字キーワード
+    ebay_driver が None の場合は (0.0, "") を返す。
+    """
+    if ebay_driver is None:
+        return 0.0, ""
+
+    # ① JAN番号で検索
+    if jan:
+        price, url = _ebay_search_lowest(ebay_driver, jan)
+        if price:
+            return price, url
+
+    # ② 商品名英数字部分で検索
+    if title_kw:
+        price, url = _ebay_search_lowest(ebay_driver, title_kw)
+        if price:
+            print(f"           (商品名キーワード検索: '{title_kw}')")
+            return price, url
 
     return 0.0, ""
 
@@ -481,9 +556,9 @@ def write_to_sheet(ws, jan: str, result: dict, dry_run: bool):
 # ==========================================
 # 1件のJANコードを処理
 # ==========================================
-def research_one(jan: str, token: str, rate: float, ws, dry_run: bool,
+def research_one(jan: str, rate: float, ws, dry_run: bool,
                  account: str = "kozuki", force: bool = False,
-                 manual_sold: int = 0, driver=None) -> dict:
+                 manual_sold: int = 0, driver=None, ebay_driver=None) -> dict:
     print(f"\n{'─'*55}")
     print(f"  JAN: {jan}")
     print(f"{'─'*55}")
@@ -534,7 +609,8 @@ def research_one(jan: str, token: str, rate: float, ws, dry_run: bool,
 
     # ── Step 3: eBay最安値（Active）────────────────
     print("  [Step 3] eBay最安値（Active Listings・新品）取得...")
-    ebay_usd, ebay_url = get_ebay_active_lowest(jan, token)
+    ebay_usd, ebay_url = get_ebay_active_lowest(
+        jan, ebay_driver, title_kw=_ascii_keywords(amazon_title or ""))
 
     if ebay_usd:
         print(f"           最安値: ${ebay_usd:.2f}")
@@ -649,13 +725,6 @@ def main():
     print(f"{'='*55}")
 
     # 初期化
-    print("\n[初期化] eBayトークン取得中...")
-    token = get_ebay_token()
-    if not token:
-        print("  ❌ eBayトークン取得失敗。終了します。")
-        sys.exit(1)
-    print("  ✅ トークン取得成功")
-
     print("[初期化] 為替レート取得中...")
     rate = get_usd_jpy_rate()
     print(f"  ✅ USD/JPY: ¥{rate:.1f}")
@@ -682,6 +751,16 @@ def main():
             print("  ⚠️  --force オプションを使用するか、Chromeプロファイルを確認してください")
             sys.exit(1)
 
+    # eBay検索用ドライバー起動（Step 3・Selenium）
+    ebay_driver = None
+    print("[初期化] eBay検索ドライバー起動中...")
+    try:
+        ebay_driver = _create_ebay_driver()
+        print("  ✅ eBay検索ドライバー起動完了")
+    except Exception as e:
+        print(f"  ⚠️  eBay検索ドライバー起動失敗: {e}")
+        print("     Step 3をスキップします（eBay価格は¥0で計算されます）")
+
     # 全JANコードを処理
     summary = {"go": [], "no_go": [], "skipped": []}
     try:
@@ -691,8 +770,9 @@ def main():
                 print(f"\n  ⚠️  無効なJANコード: {jan}（スキップ）")
                 continue
 
-            result = research_one(jan, token, rate, ws, dry_run, account=account,
-                                  force=force, manual_sold=manual_sold, driver=t_driver)
+            result = research_one(jan, rate, ws, dry_run, account=account,
+                                  force=force, manual_sold=manual_sold, driver=t_driver,
+                                  ebay_driver=ebay_driver)
 
             if result["status"] == "skipped":
                 summary["skipped"].append(jan)
@@ -706,6 +786,12 @@ def main():
         if t_driver:
             t_driver.quit()
             print("\n  Teapeakドライバーを終了しました。")
+        if ebay_driver:
+            try:
+                ebay_driver.quit()
+            except Exception:
+                pass
+            print("  eBay検索ドライバーを終了しました。")
 
     # サマリー表示
     print(f"\n{'='*55}")

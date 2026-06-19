@@ -152,47 +152,27 @@ def main():
             time.sleep(0.5)  # APIレートリミット対策
 
             # ──────────────────────────────────────
-            # 3. 競合最安値・出品数チェック（Browse API）
-            # ──────────────────────────────────────
-            _jan   = str(product.get("JANコード", "") or "").strip()
-            _app   = CONFIG.get("EBAY_APP_ID", "")
-            _sec   = CONFIG.get("EBAY_CLIENT_SECRET", "")
-            if _jan and _app and _sec:
-                rival = ebay.get_jp_search_stats(
-                    jan_code      = _jan,
-                    seller_id     = CONFIG.get("EBAY_SELLER_ID", ""),
-                    app_id        = _app,
-                    client_secret = _sec,
-                    product_name  = product.get("商品名", ""),
-                )
-                sheets.update_rival_price(asin, rival["lowest_price"], rival["count"])
-                if rival.get("my_rank") is not None:
-                    sheets.update_my_rank(asin, rival["my_rank"])
-                print(f"  🏆 競合: 最安値 ${rival['lowest_price']} / {rival['count']}件 / 順位: {rival['my_rank']}")
-                time.sleep(1)  # Browse APIレート制限対策
-
-            # ──────────────────────────────────────
-            # 4. 判定ロジック
+            # 3. 判定ロジック
             # ──────────────────────────────────────
 
-            # ケース①: Amazon在庫切れ → eBay出品停止（既に在庫0なら何もしない）
+            # ケース①: Amazon在庫切れ → eBay数量を0に更新（出品は残す）
             if not amazon_in_stock and ebay_available:
-                ebay.end_listing(ebay_id)
-                sheets.update_status(asin, "在庫切れ停止")
+                ebay.update_quantity(ebay_id, 0)
+                sheets.update_status(asin, "在庫数0")
                 alerts.append({
                     "type": "⛔ 在庫切れ",
                     "asin": asin,
                     "ebay_id": ebay_id,
-                    "message": "Amazon在庫切れ → eBay在庫数0に更新",
+                    "message": "Amazon在庫切れ → eBay数量0に更新（出品継続）",
                     "product": product.get("商品名", "")[:40],
                 })
-                print(f"  ⛔ 在庫切れ → eBay在庫数0に更新")
+                print(f"  ⛔ 在庫切れ → eBay数量0に更新（出品継続）")
                 continue
 
             if not amazon_in_stock and not ebay_available:
-                # 既に在庫0停止済み → シートステータスだけ合わせる
-                sheets.update_status(asin, "在庫切れ停止")
-                print(f"  ⛔ 在庫切れ（既に停止済み）")
+                # 既に数量0 → シートステータスだけ合わせる
+                sheets.update_status(asin, "在庫数0")
+                print(f"  ⛔ 在庫切れ（既に数量0）")
                 continue
 
             # ケース②: Amazon在庫あり かつ eBayが非表示（Active+在庫0）または終了済み

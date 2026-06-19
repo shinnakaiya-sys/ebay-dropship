@@ -269,6 +269,12 @@ class EbayChecker:
             lowest_competitor = float("inf")
             my_rank = None
 
+            def _item_total(item: dict) -> float:
+                price = float(item.get("price", {}).get("value", 0))
+                opts  = item.get("shippingOptions", [])
+                ship  = float(opts[0].get("shippingCost", {}).get("value", 0)) if opts else 0.0
+                return price + ship
+
             for rank, item in enumerate(items, start=1):
                 item_seller = item.get("seller", {}).get("username", "")
                 is_mine = seller_id and item_seller.lower() == seller_id.lower()
@@ -277,14 +283,29 @@ class EbayChecker:
                     if my_rank is None:
                         my_rank = rank
                 else:
-                    price = float(item.get("price", {}).get("value", 0))
-                    shipping_options = item.get("shippingOptions", [])
-                    shipping = float(
-                        shipping_options[0].get("shippingCost", {}).get("value", 0)
-                    ) if shipping_options else 0.0
-                    total = price + shipping
+                    total = _item_total(item)
                     if total > 0 and total < lowest_competitor:
                         lowest_competitor = total
+
+            # 広域検索でセラーが見つからない場合、セラー専用検索で補完して順位を逆算
+            if seller_id and my_rank is None:
+                seller_filter = f"itemLocationCountry:JP,sellers:{{{seller_id}}}"
+                seller_items, _ = self._browse_search_all(
+                    token, query_params,
+                    extra_filter=seller_filter,
+                    max_items=10,
+                )
+                if seller_items:
+                    my_total = _item_total(seller_items[0])
+                    if my_total > 0:
+                        # 広域結果の中で自分より安い競合を数えて順位を算出
+                        cheaper = sum(
+                            1 for it in items
+                            if (it.get("seller", {}).get("username", "").lower() != seller_id.lower())
+                            and 0 < _item_total(it) < my_total
+                        )
+                        my_rank = cheaper + 1
+                        print(f"           (セラー専用検索で順位補完: {my_rank}位 / 自分の価格: ${my_total:.2f})")
 
             return {
                 "lowest_price": round(lowest_competitor, 2) if lowest_competitor != float("inf") else 0.0,
