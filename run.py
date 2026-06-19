@@ -36,7 +36,11 @@ from notifier import Notifier
 
 
 
+MAX_RUN_SECONDS = 5 * 3600 + 15 * 60  # 5時間15分で自主終了（GitHub 6時間上限より前）
+
+
 def main():
+    run_start = time.time()
     print("=" * 60)
     print(f"🚀 毎日チェック開始: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print("=" * 60)
@@ -78,6 +82,12 @@ def main():
 
     try:
         for i, product in enumerate(products):
+            # 制限時間チェック — 残り時間が少なければ次回に持ち越す
+            elapsed = time.time() - run_start
+            if elapsed > MAX_RUN_SECONDS:
+                print(f"\n⏰ 実行時間 {elapsed/3600:.1f}h に達したため終了（次回の実行で続きを処理）")
+                break
+
             asin        = product["ASIN"]
             ebay_id     = product["eBay商品ID"]
             base_price_raw = product.get("仕入れ基準価格", "")

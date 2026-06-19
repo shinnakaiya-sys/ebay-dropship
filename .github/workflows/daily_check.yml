@@ -15,6 +15,7 @@ on:
 jobs:
   daily-check:
     runs-on: ubuntu-latest
+    timeout-minutes: 340  # 5時間40分でタイムアウト（GitHub上限6時間より前に確実に終了）
 
     steps:
       - name: リポジトリをチェックアウト
