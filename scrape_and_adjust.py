@@ -47,18 +47,34 @@ def _parse_shipping_usd(text: str, jpy_rate: float) -> float:
 
 # ==========================================
 # Chromeドライバー起動
+# 環境変数 HEADLESS=1 でヘッドレスモード（VPS用）
 # ==========================================
 def _create_driver():
     import shutil
     from selenium import webdriver
     from selenium.webdriver.chrome.service import Service
     from selenium.webdriver.chrome.options import Options
+
+    headless = os.environ.get("HEADLESS", "0") == "1"
+
     options = Options()
-    profile_path = os.path.join(BASE_DIR, "ebay_session")
-    options.add_argument(f"--user-data-dir={profile_path}")
+
+    if headless:
+        options.add_argument("--headless=new")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--disable-gpu")
+        options.add_argument("--disable-software-rasterizer")
+    else:
+        profile_path = os.path.join(BASE_DIR, "ebay_session")
+        options.add_argument(f"--user-data-dir={profile_path}")
+
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_argument("--lang=en-US")
     options.add_argument("--window-size=1920,1080")
+    options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                         "AppleWebKit/537.36 (KHTML, like Gecko) "
+                         "Chrome/124.0.0.0 Safari/537.36")
     options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
     options.add_experimental_option("useAutomationExtension", False)
     options.add_experimental_option("prefs", {"intl.accept_languages": "en-US,en"})
