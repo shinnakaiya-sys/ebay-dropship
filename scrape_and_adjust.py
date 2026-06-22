@@ -24,6 +24,7 @@ import argparse
 from config import CONFIG
 from sheets_manager import SheetsManager, SHEET_MASTER
 from ebay_checker import EbayChecker
+from keepa_checker import KeepaChecker
 from run import calc_sell_price
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -235,15 +236,21 @@ def run_scrape(sheets: SheetsManager, products: list, seller_id: str,
 # ==========================================
 # Step 2: 競合価格連動 価格調整
 # ==========================================
-def run_adjust(sheets: SheetsManager, dry_run: bool, limit: int) -> None:
+def run_adjust(sheets: SheetsManager, ebay, keepa, dry_run: bool,
+               limit: int = 0, filter_asins: list = None) -> None:
     for key in ["TARGET_MARGIN", "EBAY_FEE_RATE", "TARIFF_RATE",
-                "MIN_SELL_PRICE_USD", "PRICE_CHANGE_THRESHOLD"]:
+                "MIN_SELL_PRICE_USD"]:
         val = sheets.get_settings().get(key)
         if val:
             CONFIG[key] = val
 
-    ebay     = EbayChecker(CONFIG["EBAY_TOKEN"])
     products = sheets.get_active_products()
+
+    # filter_asins 指定時は対象商品を絞り込む
+    if filter_asins:
+        id_set   = set(filter_asins)
+        products = [p for p in products
+                    if (p.get("ASIN") or p.get("JANコード", "")) in id_set]
 
     # J列が数値の商品のみ（"競合なし" は除外）
     targets = []
@@ -288,7 +295,18 @@ def run_adjust(sheets: SheetsManager, dry_run: bool, limit: int) -> None:
                     pass
             min_raw     = product.get("下限価格(USD)", "")
             product_min = float(min_raw) if str(min_raw).strip() else None
-            cost_floor  = calc_sell_price(float(base_raw), product_config, min_price=product_min)
+
+            # 重量: 新品リサーチタブ → Keepa → デフォルト1.0kgの優先順
+            jan_code  = str(product.get("JANコード", "")).strip()
+            asin_code = str(product.get("ASIN", "")).strip()
+            weight_kg = sheets.get_weight_from_research(jan_code) if jan_code else None
+            if weight_kg is None and asin_code and keepa:
+                weight_kg = keepa.get_weight(asin_code)
+                if weight_kg:
+                    print(f"  📦 Keepaから重量取得: {weight_kg}kg")
+            weight_kg = weight_kg or 1.0
+
+            cost_floor  = calc_sell_price(float(base_raw), product_config, weight_kg, min_price=product_min)
 
             target    = round(rival_price - 0.01, 2)
             new_price = max(target, cost_floor)
@@ -298,13 +316,6 @@ def run_adjust(sheets: SheetsManager, dry_run: bool, limit: int) -> None:
             else:
                 print(f"  競合${rival_price} - $0.01 = ${new_price}")
             print(f"  現在: ${current_price}  →  新価格: ${new_price}")
-
-            if current_price > 0:
-                diff = abs(new_price - current_price) / current_price
-                if diff <= CONFIG["PRICE_CHANGE_THRESHOLD"]:
-                    print(f"  → 変動率 {diff:.1%} ≤ 閾値 → スキップ")
-                    skip += 1
-                    continue
 
             if not dry_run:
                 if ebay_id:
@@ -354,17 +365,52 @@ def main():
     seller_id = CONFIG.get("EBAY_SELLER_ID", "")
     jpy_rate  = CONFIG.get("JPY_TO_USD", 150.0)
 
-    if do_scrape:
+    # ebay / keepa は一度だけ初期化
+    ebay  = EbayChecker(CONFIG["EBAY_TOKEN"]) if do_adjust else None
+    keepa = (KeepaChecker(CONFIG["KEEPA_API_KEY"])
+             if do_adjust and CONFIG.get("KEEPA_API_KEY") else None)
+
+    BATCH_SIZE = 10
+
+    if do_scrape and do_adjust:
+        # スクレイプ→調整を10件ずつバッチで実行
+        products = sheets.get_active_products()
+        targets  = [p for p in products
+                    if str(p.get("最安値順URL") or "").startswith("http")]
+        if args.limit > 0:
+            targets = targets[:args.limit]
+
+        print(f"  対象: {len(products)} 件  M列URL有り: {len(targets)} 件  "
+              f"セラーID: {seller_id}  JPY/USD: {jpy_rate}")
+
+        total_batches = max(1, (len(targets) + BATCH_SIZE - 1) // BATCH_SIZE)
+        for bi, i in enumerate(range(0, max(len(targets), 1), BATCH_SIZE), start=1):
+            batch = targets[i:i + BATCH_SIZE]
+            if not batch:
+                break
+            print(f"\n{'='*55}")
+            print(f"  バッチ {bi}/{total_batches}"
+                  f"（{i+1}〜{min(i+BATCH_SIZE, len(targets))}件目）")
+            print(f"{'='*55}")
+            print("-" * 55)
+            run_scrape(sheets, batch, seller_id, jpy_rate, limit=0)
+            batch_ids = [p.get("ASIN") or p.get("JANコード", "") for p in batch]
+            print("-" * 55)
+            print("  価格調整フェーズ")
+            print("-" * 55)
+            run_adjust(sheets, ebay, keepa, args.dry_run, filter_asins=batch_ids)
+
+    elif do_scrape:
         products = sheets.get_active_products()
         print(f"  対象: {len(products)} 件  セラーID: {seller_id}  JPY/USD: {jpy_rate}")
         print("-" * 55)
         run_scrape(sheets, products, seller_id, jpy_rate, args.limit)
 
-    if do_adjust:
+    elif do_adjust:
         print("-" * 55)
         print("  価格調整フェーズ開始")
         print("-" * 55)
-        run_adjust(sheets, args.dry_run, args.limit)
+        run_adjust(sheets, ebay, keepa, args.dry_run, limit=args.limit)
 
     print("=" * 55)
     print("  全処理完了")

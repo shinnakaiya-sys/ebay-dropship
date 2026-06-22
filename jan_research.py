@@ -390,7 +390,7 @@ def _ebay_search_lowest(driver, keyword: str, debug: bool = False) -> tuple[floa
     from urllib.parse import quote_plus
     url = (f"https://www.ebay.com/sch/i.html"
            f"?_nkw={quote_plus(keyword)}&_sacat=0&_from=R40&_trksid=m570.l1313"
-           f"&LH_PrefLoc=2&_sop=15")
+           f"&LH_BIN=1&LH_ItemCondition=1000&LH_PrefLoc=2&_sop=15")
     try:
         driver.get(url)
         try:

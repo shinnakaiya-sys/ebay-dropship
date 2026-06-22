@@ -22,6 +22,7 @@ _tqdm.tqdm = _NoTqdm
 _tqdm_auto.tqdm = _NoTqdm
 
 import keepa
+import math
 import time
 
 # トークンが少ないときの閾値
@@ -223,6 +224,40 @@ class KeepaChecker:
         result = self.check(asin)
         result["jan_code"] = jan_code
         return result
+
+    def get_weight(self, asin: str) -> float | None:
+        """ASINから請求重量(kg)のみを取得（history=0でトークン節約）"""
+        import requests
+        try:
+            resp = requests.get(
+                "https://api.keepa.com/product",
+                params={"key": self._api_key, "domain": 5, "asin": asin, "history": 0},
+                timeout=15,
+            )
+            products = resp.json().get("products", [])
+            if not products:
+                return None
+            p          = products[0]
+            pkg_weight = p.get("packageWeight")  # grams
+            pkg_length = p.get("packageLength")  # mm
+            pkg_width  = p.get("packageWidth")   # mm
+            pkg_height = p.get("packageHeight")  # mm
+            actual_kg = pkg_weight / 1000.0 if pkg_weight and pkg_weight > 0 else None
+            vol_kg    = None
+            if pkg_length and pkg_width and pkg_height and pkg_length > 0:
+                vol_kg = (pkg_length / 10) * (pkg_width / 10) * (pkg_height / 10) / 8000
+            if actual_kg is not None and vol_kg is not None:
+                weight_kg = max(actual_kg, vol_kg)
+            elif actual_kg is not None:
+                weight_kg = actual_kg
+            elif vol_kg is not None:
+                weight_kg = vol_kg
+            else:
+                return None
+            return math.ceil(weight_kg * 1000) / 1000
+        except Exception as e:
+            print(f"  ⚠️  Keepa重量取得失敗 ({asin}): {e}")
+            return None
 
     def _empty_result(self, asin: str) -> dict:
         return {

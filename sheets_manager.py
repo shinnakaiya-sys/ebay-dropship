@@ -39,6 +39,7 @@ SCOPES = [
 
 # シート名定義
 SHEET_MASTER    = "商品マスタ"
+SHEET_RESEARCH  = "新品リサーチ"
 SHEET_PENDING   = "出品待ちリスト"
 SHEET_PRICE     = "価格履歴"
 SHEET_ALERT     = "アラートログ"
@@ -72,6 +73,7 @@ MASTER_COLS = [
     "自分の順位",      # N  最安値順で自分のアカウントが何番目か
     "登録日",          # O
     "メモ",            # P
+    "請求重量(kg)",    # Q
 ]
 
 # 出品待ちリストのカラム定義
@@ -146,13 +148,18 @@ class SheetsManager:
     def get_active_products(self) -> list[dict]:
         """ステータスが「出品中」または「在庫切れ停止」の商品を返す"""
         ws = self.sheet.worksheet(SHEET_MASTER)
-        records = ws.get_all_records(expected_headers=MASTER_COLS)
-        active = [
+        rows = ws.get_all_values()
+        if len(rows) < 2:
+            return []
+        records = [
+            {col: (row[i] if i < len(row) else "") for i, col in enumerate(MASTER_COLS)}
+            for row in rows[1:]
+        ]
+        return [
             r for r in records
             if r.get("ステータス") in ("出品中", "在庫切れ停止")
             and (r.get("ASIN") or r.get("JANコード"))
         ]
-        return active
 
     # ──────────────────────────────────────────────────────
     # 商品マスタ: ステータス更新
@@ -285,6 +292,26 @@ class SheetsManager:
     # ──────────────────────────────────────────────────────
     # ヘルパー
     # ──────────────────────────────────────────────────────
+    def get_weight_from_research(self, jan_code: str) -> float | None:
+        """新品リサーチタブのM列（請求重量kg）からJANコードで重量を取得"""
+        try:
+            ws   = self.sheet.worksheet(SHEET_RESEARCH)
+            cell = ws.find(str(jan_code), in_column=1)
+            if cell:
+                val = ws.cell(cell.row, 13).value  # M列=13
+                if val:
+                    return float(val)
+        except Exception:
+            pass
+        return None
+
+    def update_weight(self, asin: str, weight_kg: float):
+        """請求重量をQ列（17列目）に更新"""
+        ws = self.sheet.worksheet(SHEET_MASTER)
+        cell = self._find_asin_cell(ws, asin)
+        if cell:
+            ws.update_cell(cell.row, 17, weight_kg)
+
     def update_my_rank(self, asin: str, rank):
         """自分の順位をN列（14列目）に更新"""
         ws = self.sheet.worksheet(SHEET_MASTER)
