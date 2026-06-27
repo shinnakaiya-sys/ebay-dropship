@@ -141,8 +141,29 @@ def scrape_ebay_search(driver, url: str, my_seller_id: str, jpy_rate: float,
         item_id = m.group(1)
         count  += 1
 
-        # 商品IDで自分の出品を判定（セラー情報が非表示の場合に対応）
+        # 商品IDで自分の出品を判定（ログイン不要・最優先）
         is_mine = bool(my_item_id_clean and item_id == my_item_id_clean)
+
+        # セラー名でも判定（ログイン時のフォールバック）
+        if not is_mine and my_seller_lower:
+            seller = ""
+            for a_el in item.find_elements(By.CSS_SELECTOR, "a[href*='/usr/']"):
+                txt = a_el.text.strip()
+                if txt:
+                    seller = txt.lower()
+                    break
+            if not seller:
+                for _css in ("span.s-item__seller-info-text",
+                             "span[class*='seller-info']",
+                             "span.su-styled-text.primary.large"):
+                    for sel_el in item.find_elements(By.CSS_SELECTOR, _css):
+                        txt = sel_el.text.strip()
+                        if txt and not re.match(r"^\d[\d,]* (watchers?|sold)$", txt, re.I):
+                            seller = txt.lower()
+                            break
+                    if seller:
+                        break
+            is_mine = my_seller_lower in seller
         if is_mine:
             if my_rank is None:
                 my_rank = count
