@@ -127,6 +127,7 @@ def scrape_ebay_search(driver, url: str, my_seller_id: str, jpy_rate: float) -> 
     my_rank           = None
     count             = 0
 
+    _debug_done = False
     for item in items:
         links = item.find_elements(By.CSS_SELECTOR, "a[href*='/itm/']")
         if not links:
@@ -139,21 +140,37 @@ def scrape_ebay_search(driver, url: str, my_seller_id: str, jpy_rate: float) -> 
         item_id = m.group(1)
         count  += 1
 
+        # 初回のみ seller 関連 HTML をデバッグ出力
+        if not _debug_done:
+            _debug_done = True
+            _all_a = item.find_elements(By.CSS_SELECTOR, "a[href*='/usr/']")
+            print(f"    [DEBUG] /usr/ links: {[a.text for a in _all_a]}")
+            _all_span = item.find_elements(By.CSS_SELECTOR, "span[class*='seller']")
+            print(f"    [DEBUG] seller spans: {[s.text for s in _all_span]}")
+
         seller = ""
-        _seller_selectors = (
-            "span.s-item__seller-info-text",
-            "a.s-item__seller-info-text",
-            "span[class*='seller-info']",
-            "span.su-styled-text.primary.large",
-        )
-        for _css in _seller_selectors:
-            for sel_el in item.find_elements(By.CSS_SELECTOR, _css):
-                txt = sel_el.text.strip()
-                if txt and not re.match(r"^\d[\d,]* (watchers?|sold)$", txt, re.I):
-                    seller = txt.lower()
-                    break
-            if seller:
+        # セラープロフィールリンク (/usr/) から取得（最も安定）
+        for a_el in item.find_elements(By.CSS_SELECTOR, "a[href*='/usr/']"):
+            txt = a_el.text.strip()
+            if txt:
+                seller = txt.lower()
                 break
+        # フォールバック: span系セレクタ
+        if not seller:
+            _seller_selectors = (
+                "span.s-item__seller-info-text",
+                "a.s-item__seller-info-text",
+                "span[class*='seller-info']",
+                "span.su-styled-text.primary.large",
+            )
+            for _css in _seller_selectors:
+                for sel_el in item.find_elements(By.CSS_SELECTOR, _css):
+                    txt = sel_el.text.strip()
+                    if txt and not re.match(r"^\d[\d,]* (watchers?|sold)$", txt, re.I):
+                        seller = txt.lower()
+                        break
+                if seller:
+                    break
 
         is_mine = my_seller_lower and my_seller_lower in seller
         if is_mine:
