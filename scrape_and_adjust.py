@@ -102,7 +102,8 @@ def _create_driver():
 # ==========================================
 # eBay検索ページから競合価格+送料を取得
 # ==========================================
-def scrape_ebay_search(driver, url: str, my_seller_id: str, jpy_rate: float) -> dict:
+def scrape_ebay_search(driver, url: str, my_seller_id: str, jpy_rate: float,
+                       my_item_id: str = "") -> dict:
     from selenium.webdriver.common.by import By
     from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
@@ -123,11 +124,11 @@ def scrape_ebay_search(driver, url: str, my_seller_id: str, jpy_rate: float) -> 
         return {"lowest_price": 0.0, "my_rank": None, "count": 0}
 
     my_seller_lower   = (my_seller_id or "").lower()
+    my_item_id_clean  = re.sub(r"\D", "", my_item_id or "")
     competitor_totals = []
     my_rank           = None
     count             = 0
 
-    _debug_done = False
     for item in items:
         links = item.find_elements(By.CSS_SELECTOR, "a[href*='/itm/']")
         if not links:
@@ -140,39 +141,8 @@ def scrape_ebay_search(driver, url: str, my_seller_id: str, jpy_rate: float) -> 
         item_id = m.group(1)
         count  += 1
 
-        # 初回のみ seller 関連 HTML をデバッグ出力
-        if not _debug_done:
-            _debug_done = True
-            _all_a = item.find_elements(By.CSS_SELECTOR, "a[href*='/usr/']")
-            print(f"    [DEBUG] /usr/ links: {[a.text for a in _all_a]}")
-            _all_span = item.find_elements(By.CSS_SELECTOR, "span[class*='seller']")
-            print(f"    [DEBUG] seller spans: {[s.text for s in _all_span]}")
-
-        seller = ""
-        # セラープロフィールリンク (/usr/) から取得（最も安定）
-        for a_el in item.find_elements(By.CSS_SELECTOR, "a[href*='/usr/']"):
-            txt = a_el.text.strip()
-            if txt:
-                seller = txt.lower()
-                break
-        # フォールバック: span系セレクタ
-        if not seller:
-            _seller_selectors = (
-                "span.s-item__seller-info-text",
-                "a.s-item__seller-info-text",
-                "span[class*='seller-info']",
-                "span.su-styled-text.primary.large",
-            )
-            for _css in _seller_selectors:
-                for sel_el in item.find_elements(By.CSS_SELECTOR, _css):
-                    txt = sel_el.text.strip()
-                    if txt and not re.match(r"^\d[\d,]* (watchers?|sold)$", txt, re.I):
-                        seller = txt.lower()
-                        break
-                if seller:
-                    break
-
-        is_mine = my_seller_lower and my_seller_lower in seller
+        # 商品IDで自分の出品を判定（セラー情報が非表示の場合に対応）
+        is_mine = bool(my_item_id_clean and item_id == my_item_id_clean)
         if is_mine:
             if my_rank is None:
                 my_rank = count
@@ -226,14 +196,16 @@ def run_scrape(sheets: SheetsManager, products: list, seller_id: str,
     done = error = 0
     try:
         for i, product in enumerate(targets):
-            asin = product.get("ASIN") or product.get("JANコード", "")
-            name = product.get("商品名", "")
-            url  = str(product.get("最安値順URL", "")).strip()
+            asin    = product.get("ASIN") or product.get("JANコード", "")
+            name    = product.get("商品名", "")
+            url     = str(product.get("最安値順URL", "")).strip()
+            ebay_id = str(product.get("eBay商品ID", "")).strip()
 
             print(f"[スクレイプ {i+1}/{len(targets)}] {name[:40]}")
 
             try:
-                result = scrape_ebay_search(driver, url, seller_id, jpy_rate)
+                result = scrape_ebay_search(driver, url, seller_id, jpy_rate,
+                                            my_item_id=ebay_id)
 
                 if result["lowest_price"] > 0:
                     sheets.update_rival_price(asin, result["lowest_price"], result["count"])
