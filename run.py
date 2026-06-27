@@ -127,7 +127,6 @@ def main():
 
             amazon_price    = keepa_data["current_price"]
             amazon_in_stock = keepa_data["in_stock"]
-            price_changed   = abs(amazon_price - base_price) / base_price > CONFIG["PRICE_CHANGE_THRESHOLD"]
 
             # Sheetsに記録
             sheets.log_price(asin, "amazon", amazon_price, amazon_in_stock)
@@ -146,19 +145,8 @@ def main():
             # Sheetsに記録
             sheets.log_price(asin, "ebay", ebay_price, ebay_active)
 
-            # 計算売値・eBay価格ズレを事前算出
+            # 計算売値
             new_price = calc_sell_price(amazon_price, product_config, min_price=product_min_price)
-            floor = product_min_price if product_min_price is not None else CONFIG.get("MIN_SELL_PRICE_USD", 0)
-            ebay_price_below_floor = bool(floor) and ebay_price > 0 and ebay_price < floor
-            ebay_price_stale = (
-                ebay_price > 0
-                and (
-                    abs(ebay_price - new_price) / new_price > CONFIG["PRICE_CHANGE_THRESHOLD"]
-                    or ebay_price_below_floor
-                )
-            )
-            if ebay_price_below_floor:
-                print(f"  ⚠️  現在のeBay価格 ${ebay_price} が下限 ${floor} を下回っています → 補正対象")
             time.sleep(0.5)  # APIレートリミット対策
 
             # ──────────────────────────────────────
@@ -198,24 +186,6 @@ def main():
                     "product": product["商品名"][:40],
                 })
                 print(f"  ✅ 在庫復活 → eBay出品復活（{ebay_listing_status}）")
-                continue
-
-            # ケース③: Amazon価格変動 or eBay価格ズレ → eBay価格更新
-            if amazon_in_stock and ebay_available and (price_changed or ebay_price_stale):
-                ebay.revise_price(ebay_id, new_price)
-                sheets.update_price(asin, amazon_price, new_price)
-                if price_changed:
-                    reason = f"Amazon価格変動 ¥{base_price:,.0f}→¥{amazon_price:,.0f}"
-                else:
-                    reason = f"eBay価格ズレ(${ebay_price}→${new_price})"
-                alerts.append({
-                    "type": "💰 価格変動",
-                    "asin": asin,
-                    "ebay_id": ebay_id,
-                    "message": f"{reason} → eBay更新: ${new_price}",
-                    "product": product["商品名"][:40],
-                })
-                print(f"  💰 {reason} → eBay: ${new_price}")
                 continue
 
             sheets.update_price(asin, amazon_price, new_price)
