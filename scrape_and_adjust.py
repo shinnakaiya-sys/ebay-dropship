@@ -140,10 +140,19 @@ def scrape_ebay_search(driver, url: str, my_seller_id: str, jpy_rate: float) -> 
         count  += 1
 
         seller = ""
-        for sel_el in item.find_elements(By.CSS_SELECTOR, "span.su-styled-text.primary.large"):
-            txt = sel_el.text.strip()
-            if txt and not re.match(r"^\d[\d,]* (watchers?|sold)$", txt, re.I):
-                seller = txt.lower()
+        _seller_selectors = (
+            "span.s-item__seller-info-text",
+            "a.s-item__seller-info-text",
+            "span[class*='seller-info']",
+            "span.su-styled-text.primary.large",
+        )
+        for _css in _seller_selectors:
+            for sel_el in item.find_elements(By.CSS_SELECTOR, _css):
+                txt = sel_el.text.strip()
+                if txt and not re.match(r"^\d[\d,]* (watchers?|sold)$", txt, re.I):
+                    seller = txt.lower()
+                    break
+            if seller:
                 break
 
         is_mine = my_seller_lower and my_seller_lower in seller
@@ -154,9 +163,14 @@ def scrape_ebay_search(driver, url: str, my_seller_id: str, jpy_rate: float) -> 
 
         price = 0.0
         for pel in item.find_elements(By.CSS_SELECTOR, "[class*='s-card__price']"):
-            m2 = re.search(r'\$([0-9,]+\.?\d*)', pel.text)
+            text = pel.text
+            m2 = re.search(r'\$([0-9,]+\.?\d*)', text)
             if m2:
                 price = float(m2.group(1).replace(",", ""))
+                break
+            m2 = re.search(r'JPY\s*([0-9,]+)', text, re.I)
+            if m2:
+                price = round(float(m2.group(1).replace(",", "")) / jpy_rate, 2)
                 break
         if price <= 0:
             continue
