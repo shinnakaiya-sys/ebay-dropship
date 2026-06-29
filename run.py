@@ -127,6 +127,7 @@ def main():
 
             amazon_price    = keepa_data["current_price"]
             amazon_in_stock = keepa_data["in_stock"]
+            price_changed   = abs(amazon_price - base_price) / base_price >= 0.05
 
             # Sheetsに記録
             sheets.log_price(asin, "amazon", amazon_price, amazon_in_stock)
@@ -186,6 +187,21 @@ def main():
                     "product": product["商品名"][:40],
                 })
                 print(f"  ✅ 在庫復活 → eBay出品復活（{ebay_listing_status}）")
+                continue
+
+            # ケース③: Amazon価格が5%以上変動 → eBay価格更新
+            if amazon_in_stock and ebay_available and price_changed:
+                ebay.revise_price(ebay_id, new_price)
+                sheets.update_price(asin, amazon_price, new_price)
+                reason = f"Amazon価格変動 ¥{base_price:,.0f}→¥{amazon_price:,.0f}"
+                alerts.append({
+                    "type": "💰 価格変動",
+                    "asin": asin,
+                    "ebay_id": ebay_id,
+                    "message": f"{reason} → eBay更新: ${new_price}",
+                    "product": product["商品名"][:40],
+                })
+                print(f"  💰 {reason} → eBay: ${new_price}")
                 continue
 
             sheets.update_price(asin, amazon_price, new_price)
