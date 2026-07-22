@@ -13,6 +13,7 @@ eBay 自動出品モジュール
   python ebay_lister.py --asin BXXXXXXX  # 1件だけ出品（テスト用）
 """
 
+import base64
 import csv as _csv
 import os as _os
 import time
@@ -23,6 +24,10 @@ from datetime import datetime, timedelta
 from config import CONFIG
 from keepa_checker import KeepaChecker
 from sheets_manager import SheetsManager
+
+
+# Taxonomy API OAuth Application Token キャッシュ（有効期限内は再利用）
+_taxonomy_oauth: dict = {"token": "", "expires_at": 0.0}
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -447,6 +452,96 @@ class EbayLister:
 
 
 # ──────────────────────────────────────────────────────────
+# eBay OAuth Application Token 共通ヘルパー（Taxonomy・Catalog両用）
+# ──────────────────────────────────────────────────────────
+
+def _get_ebay_app_token(config: dict) -> str:
+    """Client Credentials で Application Token を取得・キャッシュする"""
+    global _taxonomy_oauth
+    if time.time() < _taxonomy_oauth["expires_at"] - 60:
+        return _taxonomy_oauth["token"]
+    app_id = config.get("EBAY_APP_ID", "")
+    secret = config.get("EBAY_CLIENT_SECRET", "")
+    if not app_id or not secret:
+        return ""
+    creds = base64.b64encode(f"{app_id}:{secret}".encode()).decode()
+    resp = requests.post(
+        "https://api.ebay.com/identity/v1/oauth2/token",
+        headers={
+            "Authorization": f"Basic {creds}",
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+        data="grant_type=client_credentials&scope=https%3A%2F%2Fapi.ebay.com%2Foauth%2Fapi_scope",
+        timeout=10,
+    )
+    if resp.status_code != 200:
+        print(f"  ⚠️  eBay App Token 取得失敗: HTTP {resp.status_code}")
+        return ""
+    data = resp.json()
+    _taxonomy_oauth["token"] = data.get("access_token", "")
+    _taxonomy_oauth["expires_at"] = time.time() + data.get("expires_in", 7200)
+    return _taxonomy_oauth["token"]
+
+
+# ──────────────────────────────────────────────────────────
+# eBay Catalog API：EAN/JANコードから公式商品データを取得
+# ──────────────────────────────────────────────────────────
+
+def _get_catalog_data_by_ean(ean: str, config: dict) -> dict | None:
+    """
+    EAN/JANコードで eBay Commerce Catalog API を検索し商品データを返す
+
+    Returns: {"epid": str, "title": str, "description": str, "aspects": dict} or None
+    """
+    if not ean or len(str(ean).strip()) < 8:
+        return None
+    app_token = _get_ebay_app_token(config)
+    if not app_token:
+        return None
+
+    # Step 1: GTINでproduct_summaryを検索
+    search_resp = requests.get(
+        "https://api.ebay.com/commerce/catalog/v1/product_summary/search",
+        params={"gtin": ean},
+        headers={"Authorization": f"Bearer {app_token}"},
+        timeout=10,
+    )
+    if search_resp.status_code != 200:
+        return None
+    summaries = search_resp.json().get("productSummaries", [])
+    if not summaries:
+        return None
+
+    epid = summaries[0].get("epid", "")
+    if not epid:
+        return None
+
+    # Step 2: epid で詳細データを取得
+    product_resp = requests.get(
+        f"https://api.ebay.com/commerce/catalog/v1/product/{epid}",
+        headers={"Authorization": f"Bearer {app_token}"},
+        timeout=10,
+    )
+    if product_resp.status_code == 200:
+        product = product_resp.json()
+        return {
+            "epid": epid,
+            "title": product.get("title", ""),
+            "description": product.get("description", ""),
+            "aspects": product.get("aspects", {}),
+        }
+
+    # 詳細取得失敗時はサマリーの情報だけ返す
+    s = summaries[0]
+    return {
+        "epid": epid,
+        "title": s.get("title", ""),
+        "description": "",
+        "aspects": s.get("aspects", {}),
+    }
+
+
+# ──────────────────────────────────────────────────────────
 # eBayタイトルから最適カテゴリIDを自動取得
 # ──────────────────────────────────────────────────────────
 
@@ -456,89 +551,56 @@ def get_best_category(token: str, title: str, jan_code: str = "", config: dict =
     タイトル優先でeBayの最適葉カテゴリIDを自動取得
 
     優先順位:
-    1. タイトル → GetSuggestedCategories API（LeafCategoryのみ・信頼度40%以上・CSVで検証）
-    2. Anthropic AI → category_hints.md の葉カテゴリ候補から選択
+    1. タイトル → Taxonomy API（REST・LeafCategoryのみ・CSVで検証）
+    2. Anthropic AI → CSV葉カテゴリ候補から選択
     3. デフォルトカテゴリ
     """
-    base_headers = {
-        "X-EBAY-API-SITEID":              "0",
-        "X-EBAY-API-COMPATIBILITY-LEVEL": "967",
-        "X-EBAY-API-IAF-TOKEN":           token,
-        "Content-Type":                   "text/xml",
-    }
+    # タイトルが空・記号のみ・"*" などの場合はAPIを呼ばずデフォルトへ
+    _title_stripped = title.strip().strip("*").strip()
+    if not _title_stripped or len(_title_stripped) < 3:
+        print(f"  ⚠️  タイトルが無効（'{title}'）→ デフォルトカテゴリを使用")
+        return EBAY_CATEGORY_MAP["default"]
 
-    def _call_suggested(query: str) -> int:
-        """GetSuggestedCategoriesで葉カテゴリのみ取得（0=失敗）"""
-        query_safe = query.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        xml_body = (
-            "<?xml version=" + chr(34) + "1.0" + chr(34) + " encoding=" + chr(34) + "utf-8" + chr(34) + "?>"
-            "<GetSuggestedCategoriesRequest xmlns=" + chr(34) + "urn:ebay:apis:eBLBaseComponents" + chr(34) + ">"
-            "<RequesterCredentials>"
-            "<eBayAuthToken>" + token + "</eBayAuthToken>"
-            "</RequesterCredentials>"
-            "<Query>" + query_safe + "</Query>"
-            "</GetSuggestedCategoriesRequest>"
-        )
-        resp = requests.post(
-            "https://api.ebay.com/ws/api.dll",
-            headers={**base_headers, "X-EBAY-API-CALL-NAME": "GetSuggestedCategories"},
-            data=xml_body.encode("utf-8"),
+    def _call_taxonomy_api(query: str) -> int:
+        """Taxonomy API（REST）で葉カテゴリを取得（0=失敗）"""
+        app_token = _get_ebay_app_token(config or {})
+        if not app_token:
+            print("  ⚠️  Taxonomy API: トークン未取得 → スキップ")
+            return 0
+        resp = requests.get(
+            "https://api.ebay.com/commerce/taxonomy/v1/category_tree/0/get_category_suggestions",
+            params={"q": query},
+            headers={"Authorization": f"Bearer {app_token}"},
             timeout=15,
         )
         if resp.status_code != 200:
-            print(f"  ⚠️  GetSuggestedCategories HTTPエラー: {resp.status_code}")
+            print(f"  ⚠️  Taxonomy API HTTPエラー: {resp.status_code}")
             return 0
-        root = ET.fromstring(resp.text)
-        ns = {"e": "urn:ebay:apis:eBLBaseComponents"}
-        ack = root.findtext("e:Ack", namespaces=ns)
-        if ack not in ("Success", "Warning"):
-            err = root.findtext(".//e:ShortMessage", namespaces=ns) or "不明"
-            print(f"  ⚠️  GetSuggestedCategories APIエラー: {ack} / {err}")
-            return 0
-
-        suggestions = root.findall(".//e:SuggestedCategory", ns)
+        suggestions = resp.json().get("categorySuggestions", [])
         if not suggestions:
-            print(f"  ⚠️  GetSuggestedCategories: 候補なし（クエリ: {query[:40]}）")
+            print(f"  ⚠️  Taxonomy API: 候補なし（クエリ: {query[:40]}）")
             return 0
-
-        # 葉カテゴリのみ対象（APIとCSV両方でLeaf確認）
-        PCT_THRESHOLD = 40  # これ未満の信頼度はAIに委ねる
-        best_id, best_pct = None, -1
+        # 返却順が関連度順なので、先頭から葉カテゴリを探す
         for s in suggestions:
-            cat_id_str = s.findtext("e:Category/e:CategoryID", namespaces=ns)
-            pct        = int(s.findtext("e:PercentItemFound", namespaces=ns) or "0")
-            leaf       = s.findtext("e:Category/e:LeafCategory", namespaces=ns)
-            if cat_id_str and leaf == "true":
-                cat_id_int = int(cat_id_str)
-                if is_leaf_category(cat_id_int) and pct > best_pct:
-                    best_pct = pct
-                    best_id  = cat_id_int
+            cat = s.get("category", {})
+            cat_id_str = cat.get("categoryId", "")
+            cat_name   = cat.get("categoryName", "")
+            if not cat_id_str:
+                continue
+            cat_id_int = int(cat_id_str)
+            if is_leaf_category(cat_id_int):
+                return cat_id_int
+        print(f"  ⚠️  Taxonomy API: 葉カテゴリ候補なし → AI判定へ")
+        return 0
 
-        if not best_id:
-            # 候補はあるが全て非葉カテゴリ → 最初の候補IDをデバッグ表示
-            first = suggestions[0]
-            fid  = first.findtext("e:Category/e:CategoryID", namespaces=ns)
-            fname = first.findtext("e:Category/e:CategoryName", namespaces=ns)
-            fleaf = first.findtext("e:Category/e:LeafCategory", namespaces=ns)
-            print(f"  ⚠️  葉カテゴリ候補なし（例: {fid} {fname} leaf={fleaf}）→ AI判定へ")
-            return 0
-
-        if best_pct < PCT_THRESHOLD:
-            info = EBAY_CATEGORY_DB.get(best_id, {})
-            print(f"  ⚠️  API信頼度が低い（{best_pct}% < {PCT_THRESHOLD}%）: {best_id} {info.get('path', '')} → AI判定へ")
-            return 0
-
-        # 非葉カテゴリは使わない（出品エラーの原因）
-        return best_id
-
-    # Step 1: タイトルでGetSuggestedCategories
+    # Step 1: タイトルでTaxonomy API
     query = title[:80].strip() or "Japan import goods"
     try:
-        cat_id = _call_suggested(query)
+        cat_id = _call_taxonomy_api(query)
         if cat_id:
             info = EBAY_CATEGORY_DB.get(cat_id, {})
             path = info.get("path", "")
-            print(f"  🏷️  タイトルカテゴリ: {cat_id}（{path}）")
+            print(f"  🏷️  タイトルカテゴリ（Taxonomy API）: {cat_id}（{path}）")
             return cat_id
     except Exception as e:
         print(f"  ⚠️  タイトルカテゴリ取得失敗: {e}")
@@ -564,13 +626,10 @@ def get_best_category(token: str, title: str, jan_code: str = "", config: dict =
                 if product_type:
                     extra += f"Product type hint: {product_type}\n"
                 prompt = (
-                    f"You are an eBay category expert. Select the MOST SPECIFIC leaf category for this product.\n"
-                    f"IMPORTANT: You MUST choose from the list below. Reply with ONLY the numeric ID.\n\n"
                     f"Product title: {title}\n"
                     f"{extra}\n"
-                    f"Candidate leaf categories (from eBay category database):\n{category_hints}\n\n"
-                    f"Think carefully about what the product physically IS. "
-                    f"Reply with ONLY the numeric category ID from the list above."
+                    f"Candidate leaf categories:\n{category_hints}\n\n"
+                    f"Which numeric ID best matches this product?"
                 )
                 resp = requests.post(
                     "https://api.anthropic.com/v1/messages",
@@ -579,26 +638,36 @@ def get_best_category(token: str, title: str, jan_code: str = "", config: dict =
                         "x-api-key": _config.get("ANTHROPIC_API_KEY", ""),
                         "anthropic-version": "2023-06-01",
                     },
-                    json={"model": "claude-haiku-4-5-20251001", "max_tokens": 50,
-                          "messages": [{"role": "user", "content": prompt}]},
+                    json={
+                        "model": "claude-haiku-4-5-20251001",
+                        "max_tokens": 10,
+                        "system": "You are an eBay category classifier. Output ONLY the single numeric category ID that best matches the product. No words, no explanation, no punctuation — just the number.",
+                        "messages": [{"role": "user", "content": prompt}],
+                    },
                     timeout=15,
                 )
+                if resp.status_code != 200:
+                    print(f"  ⚠️  AI APIエラー: HTTP {resp.status_code} → {resp.text[:80]}")
+                    raise ValueError(f"AI API HTTP {resp.status_code}")
                 data = resp.json()
-                if data.get("content"):
-                    import re as _re
-                    _raw = data["content"][0]["text"].strip()
-                    _m = _re.search(r'\b(\d{4,6})\b', _raw)
-                    if not _m:
-                        print(f"  ⚠️  AI返却値から数値を抽出できません: {_raw[:60]}")
-                        raise ValueError("no numeric category id found")
-                    ai_cat_id = int(_m.group(1))
-                    if ai_cat_id in valid_ids and is_leaf_category(ai_cat_id):
-                        info = EBAY_CATEGORY_DB.get(ai_cat_id, {})
-                        path = info.get("path", "")
-                        print(f"  🏷️  AIカテゴリ（CSV検索）: {ai_cat_id}（{path}）")
-                        return ai_cat_id
-                    else:
-                        print(f"  ⚠️  AI返却カテゴリ {ai_cat_id} は候補外 → スキップ")
+                if not data.get("content"):
+                    err_msg = data.get("error", {}).get("message", str(data)[:80])
+                    print(f"  ⚠️  AI APIレスポンス異常: {err_msg}")
+                    raise ValueError("AI API no content")
+                import re as _re
+                _raw = data["content"][0]["text"].strip()
+                _m = _re.search(r'\b(\d{4,6})\b', _raw)
+                if not _m:
+                    print(f"  ⚠️  AI返却値から数値を抽出できません: {_raw[:60]}")
+                    raise ValueError("no numeric category id found")
+                ai_cat_id = int(_m.group(1))
+                if ai_cat_id in valid_ids and is_leaf_category(ai_cat_id):
+                    info = EBAY_CATEGORY_DB.get(ai_cat_id, {})
+                    path = info.get("path", "")
+                    print(f"  🏷️  AIカテゴリ（CSV検索）: {ai_cat_id}（{path}）")
+                    return ai_cat_id
+                else:
+                    print(f"  ⚠️  AI返却カテゴリ {ai_cat_id} は候補外 → スキップ")
         except Exception as e:
             print(f"  ⚠️  AIカテゴリ取得失敗: {e}")
 
@@ -611,17 +680,21 @@ def get_best_category(token: str, title: str, jan_code: str = "", config: dict =
 # Anthropic APIで日本語タイトル→英語eBayタイトルに変換
 # ──────────────────────────────────────────────────────────
 
-def translate_title_for_ebay(japanese_title: str, brand: str = "", model: str = "") -> str:
+def translate_title_for_ebay(japanese_title: str, brand: str = "", model: str = "",
+                             catalog_title: str = "") -> str:
     """
-    日本語タイトルをeBay Cassiniアルゴリズム最適化済み英語タイトルに変換（80文字フル活用）
+    eBay Cassiniアルゴリズム最適化済み英語タイトルを生成（80文字フル活用）
 
-    2026年eBay SEOロジック（Cassiniアルゴリズム対応）:
-    1. Brand + Model を先頭に配置（最重要キーワードを前半に）
-    2. 80文字をフル活用（未使用スペースは機会損失）
-    3. フィラーワード禁止（WOW/Amazing/Look等）
-    4. キーワード重複なし
-    5. 買い手が検索する自然な言葉を使用
-    6. 具体的スペック・互換性・カテゴリ属性を含む
+    catalog_title が指定された場合: 既存の英語タイトルを Cassini SEO 順に並び替え
+    指定なしの場合: 日本語タイトルを翻訳して最適化
+
+    2026年 Cassini SEO ルール:
+    1. Brand + Model を先頭（タイトル前半のキーワード重みが最大）
+    2. 商品タイプ・カテゴリキーワードを次に
+    3. スペック（サイズ・色・素材・容量）を中盤
+    4. 同義語・二次キーワードを末尾
+    5. 80文字フル活用（未使用は機会損失）
+    6. フィラーワード禁止・重複禁止
     """
     def _call_title_api(prompt_text: str) -> str:
         resp = requests.post(
@@ -643,7 +716,31 @@ def translate_title_for_ebay(japanese_title: str, brand: str = "", model: str = 
             return data["content"][0]["text"].strip().strip('"').strip("'")[:80]
         return ""
 
-    prompt = f"""You are an eBay SEO title expert. Convert this Japanese product to an English eBay title.
+    if catalog_title:
+        # カタログタイトル（英語）を Cassini SEO 順に並び替え
+        prompt = f"""You are an eBay SEO title expert. Reorder and optimize this existing English title for eBay Cassini search ranking.
+
+EXISTING TITLE: {catalog_title}
+
+CASSINI REORDER RULES:
+1. Brand + Model number MUST come first — Cassini weights title-start tokens most heavily
+2. Product type / category keyword second
+3. Key specs (size, color, capacity, material, count) in the middle
+4. Synonyms and secondary search terms toward the end
+5. Fill to exactly 78-80 characters — add spec keywords if short, trim filler if over 80
+6. NEVER add "New", "Japan", or duplicate keywords
+7. Title Case — preserve existing spelling/model numbers exactly
+
+Brand: {brand or "extract from title"}
+Model: {model or "extract from title"}
+
+TARGET: 78-80 characters (hard max 80).
+Reply with ONLY the reordered title. No quotes. No explanation."""
+        fallback = catalog_title[:80]
+        log_prefix = "Catalog SEO並び替え"
+    else:
+        # 日本語タイトルを英語に翻訳して最適化
+        prompt = f"""You are an eBay SEO title expert. Convert this Japanese product to an English eBay title.
 
 CRITICAL REQUIREMENT: Your title MUST be 78-80 characters long. Count every character carefully.
 Every unused character is a lost ranking opportunity in eBay Cassini search.
@@ -665,19 +762,22 @@ TARGET: exactly 80 characters (hard max). Aim for 78-80.
 EXAMPLE of good 80-char title: "Pilot G2 07 Retractable Gel Ink Fine Point 0.7mm Black Ballpoint Pen 12 Pack Set"
 
 Reply with ONLY the title. No quotes. No explanation."""
+        fallback = japanese_title[:80]
+        log_prefix = "SEO最適化タイトル"
 
     try:
         title = _call_title_api(prompt)
-        if not title:
-            return japanese_title[:80]
+        if not title or len(title.strip("*").strip()) < 5:
+            return fallback
 
         # 75文字未満なら拡張リトライ（1回）
         if len(title) < 75:
+            source = catalog_title if catalog_title else japanese_title
             expand_prompt = f"""This eBay title is only {len(title)} characters. Expand it to 78-80 characters by adding relevant keywords, specs, or synonyms. Do NOT exceed 80 characters.
 
 Current title ({len(title)} chars): {title}
 
-Product: {japanese_title}
+Product: {source}
 Brand: {brand or "N/A"} | Model: {model or "N/A"}
 
 Add keywords like: material, dimensions, color, compatibility, quantity, product type synonyms. Do NOT add "New" or "Japan" as filler.
@@ -686,13 +786,13 @@ Reply with ONLY the expanded title. No quotes."""
             if expanded and len(expanded) > len(title):
                 title = expanded
 
-        print(f"  🌐 SEO最適化タイトル: {title} ({len(title)}文字)")
+        print(f"  🌐 {log_prefix}: {title} ({len(title)}文字)")
         return title
 
     except Exception as e:
-        print(f"  ⚠️  タイトル翻訳失敗: {e}")
+        print(f"  ⚠️  タイトル生成失敗: {e}")
 
-    return japanese_title[:80]
+    return fallback
 
 def build_listing_data(asin: str, keepa_data: dict, config: dict) -> dict:
     """
@@ -714,7 +814,24 @@ def build_listing_data(asin: str, keepa_data: dict, config: dict) -> dict:
     brand         = keepa_data.get("brand", "")
     manufacturer  = keepa_data.get("manufacturer", "")
     model         = keepa_data.get("model", "") or keepa_data.get("partNumber", "")
-    title         = translate_title_for_ebay(jp_title, brand=brand, model=model)
+    jan_code      = keepa_data.get("upc", "") or ""
+
+    # Catalog API：EAN/JANコードで公式商品データを検索（タイトル・aspectsを取得）
+    _catalog = None
+    if jan_code:
+        try:
+            _catalog = _get_catalog_data_by_ean(jan_code, config)
+            if _catalog:
+                print(f"  📦 Catalog API ヒット: epid={_catalog['epid']} / {_catalog['title'][:50]}")
+        except Exception as _ce:
+            print(f"  ⚠️  Catalog API 失敗: {_ce}")
+
+    # タイトル：Catalogタイトル（英語）があればSEO並び替え、なければ日本語から翻訳
+    if _catalog and _catalog.get("title") and len(_catalog["title"].strip()) >= 10:
+        title = translate_title_for_ebay(jp_title, brand=brand, model=model,
+                                         catalog_title=_catalog["title"])
+    else:
+        title = translate_title_for_ebay(jp_title, brand=brand, model=model)
 
     description = build_description(keepa_data, amazon_price)
 
@@ -725,7 +842,6 @@ def build_listing_data(asin: str, keepa_data: dict, config: dict) -> dict:
     mpn = _mpn_raw if _mpn_raw and str(_mpn_raw).strip() not in _mpn_invalid else "Does Not Apply"
 
     # カテゴリを先に決定（Item Specifics生成に活用するため）
-    jan_code    = keepa_data.get("upc", "") or ""
     category_id = get_best_category(config["EBAY_TOKEN"], title, jan_code=jan_code, config=config,
                                      brand=brand or "", product_type=keepa_data.get("product_group", ""))
     cat_path    = EBAY_CATEGORY_DB.get(category_id, {}).get("path", "")
@@ -783,6 +899,16 @@ def build_listing_data(asin: str, keepa_data: dict, config: dict) -> dict:
             print(f"  🏷️  Item Specifics: {len(item_specifics)}項目生成")
     except Exception as _e:
         print(f"  ⚠️  Item Specifics生成失敗: {_e}")
+
+    # Catalog aspects を Item Specifics にマージ（既存フィールドは上書きしない）
+    if _catalog and _catalog.get("aspects"):
+        _merged = 0
+        for k, v_list in _catalog["aspects"].items():
+            if k not in item_specifics and v_list:
+                item_specifics[k] = str(v_list[0])[:65]
+                _merged += 1
+        if _merged:
+            print(f"  📦 Catalog aspects マージ: {_merged}件追加")
 
     # カテゴリ固有の必須フィールド補完（寸法データから自動セット）
     _w = keepa_data.get("width_cm", 0) or 0
@@ -1111,6 +1237,7 @@ def main():
     parser = argparse.ArgumentParser(description="eBay自動出品ツール")
     parser.add_argument("--asin", type=str, help="1件だけ出品するASIN（テスト用）")
     parser.add_argument("--dry-run", action="store_true", help="出品せずデータ確認のみ")
+    parser.add_argument("--limit", type=int, default=0, help="処理件数の上限（0=無制限）")
     args = parser.parse_args()
 
     print("=" * 60)
@@ -1140,6 +1267,8 @@ def main():
         # 出品待ちリストから取得
         pending = sheets.get_pending_products()
 
+    if args.limit and args.limit > 0:
+        pending = pending[:args.limit]
     print(f"\n📋 出品待ち: {len(pending)} 件\n")
 
     success_count = 0

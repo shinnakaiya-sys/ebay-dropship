@@ -59,7 +59,11 @@ def main():
         ebay_id       = str(product.get("eBay商品ID", "")).strip()
         name          = product.get("商品名", "")[:40]
         current_price = float(product.get("eBay売値(USD)") or 0)
-        rival_price   = float(product.get("競合最安値(USD)") or 0)
+        rival_raw = product.get("競合最安値(USD)") or ""
+        try:
+            rival_price = float(rival_raw) if str(rival_raw).replace(".", "").isdigit() else 0.0
+        except (ValueError, TypeError):
+            rival_price = 0.0
 
         print(f"[{i+1}/{len(targets)}] {name}")
 

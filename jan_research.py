@@ -153,9 +153,10 @@ def get_usd_jpy_rate() -> float:
 # ==========================================
 # Step 1: Terapeak で過去30日の販売数確認
 # ==========================================
-def get_terapeak_sold_count(jan: str, _unused: str, driver) -> tuple[int, str]:
+def get_terapeak_sold_count(jan: str, _unused: str, driver) -> tuple[int, str, float]:
     """
-    Terapeak（Seller Hub Research）で過去30日の販売数と代表タイトルを返す。
+    Terapeak（Seller Hub Research）で過去30日の販売数・代表タイトル・
+    販売数加重平均価格(USD)を返す。
     JANコードで検索し、複数行ヒットした場合は総販売数を合計して返す。
     """
     print(f"           Teapeakキーワード: {jan}")
@@ -164,16 +165,25 @@ def get_terapeak_sold_count(jan: str, _unused: str, driver) -> tuple[int, str]:
         do_research(driver, keywords=jan, days=30, min_price=0, category_id="")
         rows = extract_rows(driver)
         if not rows:
-            return 0, ""
+            return 0, "", 0.0
         total = 0
         first_title = rows[0].get("タイトル", "")
+        weighted_sum = 0.0
+        total_sold_for_avg = 0
         for row in rows:
             sold_str = row.get("総販売数", "0")
-            total += int(re.sub(r"[^\d]", "", sold_str) or 0)
-        return total, first_title
+            sold_n = int(re.sub(r"[^\d]", "", sold_str) or 0)
+            total += sold_n
+            price_str = row.get("平均販売価格(USD)", "")
+            m = re.search(r'[\d.]+', price_str)
+            if m and sold_n > 0:
+                weighted_sum += float(m.group()) * sold_n
+                total_sold_for_avg += sold_n
+        avg_usd = weighted_sum / total_sold_for_avg if total_sold_for_avg > 0 else 0.0
+        return total, first_title, avg_usd
     except Exception as e:
         print(f"  [Terapeak] 検索エラー: {e}")
-        return 0, ""
+        return 0, "", 0.0
 
 
 # ==========================================
@@ -348,21 +358,36 @@ def _ascii_keywords(title: str) -> str:
     return " ".join(tokens[:8])
 
 
+_EBAY_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
 def _create_ebay_driver():
-    """Step 3専用ヘッドレスドライバー（eBay公開検索・認証不要）"""
+    """
+    eBay検索用ドライバー。
+    通常は ebay_session プロファイル（非ヘッドレス）を使用。
+    環境変数 HEADLESS=1 でヘッドレスモードに切り替え可能。
+    """
+    import shutil
     from selenium import webdriver
     from selenium.webdriver.chrome.service import Service
     from selenium.webdriver.chrome.options import Options
-    from webdriver_manager.chrome import ChromeDriverManager
-    os.environ.setdefault("WDM_LOCAL", "1")
+
+    headless = os.environ.get("HEADLESS", "0") == "1"
     options = Options()
-    options.add_argument("--headless=new")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--window-size=1920,1080")
-    options.add_argument("--lang=en-US")
+
+    if headless:
+        options.add_argument("--headless=new")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--disable-gpu")
+        options.add_argument("--disable-software-rasterizer")
+    else:
+        profile_path = os.path.join(_EBAY_BASE_DIR, "ebay_session")
+        options.add_argument(f"--user-data-dir={profile_path}")
+
     options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument("--lang=en-US")
+    options.add_argument("--window-size=1920,1080")
     options.add_argument(
         "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -370,8 +395,16 @@ def _create_ebay_driver():
     options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
     options.add_experimental_option("useAutomationExtension", False)
     options.add_experimental_option("prefs", {"intl.accept_languages": "en-US,en"})
-    driver = webdriver.Chrome(
-        service=Service(ChromeDriverManager().install()), options=options)
+
+    system_cd = shutil.which("chromedriver")
+    if system_cd:
+        service = Service(system_cd)
+    else:
+        from webdriver_manager.chrome import ChromeDriverManager
+        os.environ.setdefault("WDM_LOCAL", "1")
+        service = Service(ChromeDriverManager().install())
+
+    driver = webdriver.Chrome(service=service, options=options)
     try:
         from selenium_stealth import stealth
         stealth(driver, languages=["en-US", "en"], vendor="Google Inc.",
@@ -382,50 +415,44 @@ def _create_ebay_driver():
     return driver
 
 
-def _ebay_search_lowest(driver, keyword: str, debug: bool = False) -> tuple[float, str]:
+def _ebay_search_lowest(driver, keyword: str) -> tuple[float, str]:
     """eBay検索ページから新品最安値(USD)とURLをSeleniumでスクレイピング。"""
     from selenium.webdriver.common.by import By
-    from selenium.webdriver.support.ui import WebDriverWait
-    from selenium.webdriver.support import expected_conditions as EC
     from urllib.parse import quote_plus
     url = (f"https://www.ebay.com/sch/i.html"
-           f"?_nkw={quote_plus(keyword)}&_sacat=0&_from=R40&_trksid=m570.l1313"
+           f"?_nkw={quote_plus(keyword)}&_sacat=0"
            f"&LH_BIN=1&LH_ItemCondition=1000&LH_PrefLoc=2&_sop=15")
     try:
         driver.get(url)
-        try:
-            WebDriverWait(driver, 8).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "li.s-item"))
-            )
-        except Exception:
-            pass
-        items = driver.find_elements(By.CSS_SELECTOR, "li.s-item")
+        time.sleep(4)
+
+        items = driver.find_elements(By.CSS_SELECTOR, "ul.srp-results li")
         if not items:
-            if debug:
-                screenshot_path = f"/tmp/ebay_debug_{keyword[:20].replace(' ', '_')}.png"
-                driver.save_screenshot(screenshot_path)
-                print(f"           [eBay DEBUG] スクリーンショット保存: {screenshot_path}")
-                print(f"           [eBay DEBUG] ページタイトル: {driver.title}")
             print(f"           [eBay] 検索結果なし（キーワード: {keyword[:40]}）")
             return 0.0, ""
+
         for item in items:
-            # eBayの先頭ダミー行（"Shop on eBay"）をスキップ
-            link_els = item.find_elements(By.CSS_SELECTOR, "a.s-item__link")
-            if link_els:
-                href = link_els[0].get_attribute("href") or ""
-                if "itm/123456" in href or not href:
-                    continue
-            price_els = item.find_elements(By.CSS_SELECTOR, ".s-item__price")
-            if not price_els:
+            links = item.find_elements(By.CSS_SELECTOR, "a[href*='/itm/']")
+            if not links:
                 continue
-            m = re.search(r"\$(\d[\d,]*\.?\d*)", price_els[0].text)
-            if not m:
+            href = links[0].get_attribute("href") or ""
+            if not re.search(r"/itm/(?:[^/?#]+/)?(\d{9,})", href):
                 continue
-            price_usd = float(m.group(1).replace(",", ""))
-            if price_usd <= 0:
+
+            price = 0.0
+            for sel in ["[class*='s-card__price']", "span.s-item__price"]:
+                for pel in item.find_elements(By.CSS_SELECTOR, sel):
+                    m = re.search(r'\$([0-9,]+\.?\d*)', pel.text)
+                    if m:
+                        price = float(m.group(1).replace(",", ""))
+                        break
+                if price > 0:
+                    break
+            if price <= 0:
                 continue
-            item_url = link_els[0].get_attribute("href") if link_els else ""
-            return price_usd, item_url or ""
+
+            return price, href.split("?")[0]
+
     except Exception as e:
         print(f"  [eBay Selenium] エラー: {e}")
     return 0.0, ""
@@ -583,13 +610,16 @@ def research_one(jan: str, rate: float, ws, dry_run: bool,
         print("  ⚠️  KEEPA_API_KEY未設定")
 
     # ── Step 1: Terapeak で販売実績確認 ───────────
+    terapeak_avg_usd = 0.0
     if force:
         sold_count = manual_sold if manual_sold > 0 else SOLD_THRESHOLD
         print(f"  [Step 1] ⏭  スキップ（--force 指定）販売数: {sold_count}個として処理")
     else:
         print("  [Step 1] Terapeak販売実績確認（過去30日・JANコード検索）...")
-        sold_count, ebay_title = get_terapeak_sold_count(jan, "", driver)
+        sold_count, ebay_title, terapeak_avg_usd = get_terapeak_sold_count(jan, "", driver)
         print(f"           販売数: {sold_count}個")
+        if terapeak_avg_usd:
+            print(f"           Terapeak平均販売価格: ${terapeak_avg_usd:.2f}")
 
         if sold_count < SOLD_THRESHOLD:
             print(f"  → ❌ 販売実績不足（{sold_count}個 < {SOLD_THRESHOLD}個）スキップ")
@@ -612,14 +642,20 @@ def research_one(jan: str, rate: float, ws, dry_run: bool,
     ebay_usd, ebay_url = get_ebay_active_lowest(
         jan, ebay_driver, title_kw=_ascii_keywords(amazon_title or ""))
 
+    price_source = "eBay Active"
     if ebay_usd:
         print(f"           最安値: ${ebay_usd:.2f}")
         print(f"           URL: {ebay_url[:70] if ebay_url else '(なし)'}")
+    elif terapeak_avg_usd:
+        ebay_usd = terapeak_avg_usd
+        ebay_url = ""
+        price_source = "Terapeak販売履歴(平均)"
+        print(f"           → eBay出品なし。Terapeak平均販売価格で利益計算: ${ebay_usd:.2f}")
     else:
-        print("           → eBay出品なし（利益計算は仮価格0で実行）")
+        print("           → eBay出品なし・Terapeak価格も取得不可（利益計算は価格0で実行）")
 
     # ── Step 4: 利益計算 ─────────────────────────
-    print(f"  [Step 4] 利益計算... (レート: ¥{rate:.1f}/USD)")
+    print(f"  [Step 4] 利益計算... (レート: ¥{rate:.1f}/USD, 価格ソース: {price_source})")
     profit = calc_profit(ebay_usd, amazon_jpy, rate, weight_kg)
 
     used_weight = profit['weight_kg']
@@ -751,7 +787,7 @@ def main():
             print("  ⚠️  --force オプションを使用するか、Chromeプロファイルを確認してください")
             sys.exit(1)
 
-    # eBay検索用ドライバー起動（Step 3・Selenium）
+    # eBay検索用ドライバー起動（ebay_sessionプロファイル・非ヘッドレス）
     ebay_driver = None
     print("[初期化] eBay検索ドライバー起動中...")
     try:

@@ -1,5 +1,5 @@
 """
-ebay_mpn_scraper.py - eBay販売履歴からMPNを取得し、KeepaでASINを逆引きする
+ebay_mpn_scraper.py - eBay販売履歴からMPN/GTINを取得し、KeepaでASINを逆引きする
 
 使い方:
   python3 ebay_mpn_scraper.py <セラーID>
@@ -11,12 +11,15 @@ ebay_mpn_scraper.py - eBay販売履歴からMPNを取得し、KeepaでASINを逆
   --dry-run      スプレッドシートへの書き込みをスキップ
   --csv          mpn_scraper_*.csv にも保存
   --no-sheets    スプレッドシートに保存しない
+  --domain N     Keepaドメイン（5=Amazon.co.jp, 1=Amazon.com）
 
 フロー:
   1. Selenium でItem IDリストを収集
-  2. Browse API で商品情報（MPN含む）を取得
-  3. KeepaのSearch APIでMPN→ASIN変換
-  4. 結果をスプレッドシートに保存
+  2. Browse API で商品情報（MPN・GTIN含む）を取得
+  3. Keepa で ASIN逆引き
+       優先1: GTIN（JAN/EAN/UPC）→ /product code照会（最も正確）
+       優先2: MPN → /search 検索（KeepaのpartNumber/modelと照合して検証）
+  4. 結果をスプレッドシートに保存（asin_source列で判定根拠を記録）
 """
 
 import os
@@ -94,6 +97,13 @@ def get_item_info(item_id, retry=3):
                 print(f"  ⚠ レートリミット。{wait}秒待機... ({attempt+1}/{retry})")
                 time.sleep(wait)
                 continue
+            if r.status_code == 401:
+                # トークン失効 → キャッシュ破棄して再取得
+                _token_cache["value"] = None
+                token = get_token()
+                if not token:
+                    return None
+                continue
             if not r.ok:
                 print(f"    API エラー {r.status_code}: {r.text[:150]}")
                 return None
@@ -135,88 +145,184 @@ def parse_item(data, item_id):
             sold_date = data["itemEndDate"][:10]
 
     return {
-        "item_id":   item_id,
-        "title":     data.get("title", ""),
-        "price_usd": price,
-        "condition": data.get("condition", ""),
-        "mpn":       mpn,
-        "gtin":      gtin,
-        "category":  data.get("categoryPath", ""),
-        "seller":    data.get("seller", {}).get("username", ""),
-        "sold_date": sold_date,
-        "url":       f"https://www.ebay.com/itm/{item_id}",
-        "asin":      "",
-        "amazon_url": "",
+        "item_id":     item_id,
+        "title":       data.get("title", ""),
+        "price_usd":   price,
+        "condition":   data.get("condition", ""),
+        "mpn":         mpn,
+        "gtin":        gtin,
+        "category":    data.get("categoryPath", ""),
+        "seller":      data.get("seller", {}).get("username", ""),
+        "sold_date":   sold_date,
+        "url":         f"https://www.ebay.com/itm/{item_id}",
+        "asin":        "",
+        "asin_source": "",
+        "amazon_url":  "",
     }
 
 
 # ------------------------------------------------------------------
-# Keepa MPN → ASIN 変換
+# Keepa ASIN逆引き（GTIN優先 → MPNフォールバック）
 # ------------------------------------------------------------------
 
-def mpn_to_asin(mpn: str, domain: str = "5", retry: int = 3) -> str:
-    """
-    KeepaのSearch APIでMPN→ASINを逆引きする
-    domain: 5 = Amazon.co.jp, 1 = Amazon.com
-    """
-    if not KEEPA_API_KEY:
-        print("  ⚠ KEEPA_API_KEY が設定されていません")
-        return ""
+# eBayでよく入力される「意味のないMPN」— これらはKeepa検索しない
+GENERIC_MPN = {
+    "DOESNOTAPPLY", "NOTAPPLY", "NA", "NONE", "UNKNOWN", "GENERIC",
+    "BLACK", "WHITE", "RED", "BLUE", "SILVER", "GOLD", "JAPAN", "ORIGINAL",
+}
 
+
+def _norm(s: str) -> str:
+    """型番比較用の正規化（大文字化・空白/ハイフン等を除去）"""
+    return re.sub(r"[\s\-_/.]", "", (s or "").upper())
+
+
+def is_searchable_mpn(mpn: str) -> bool:
+    """Keepa検索する価値のあるMPNか判定（汎用語・短すぎ・数字のみは除外）"""
+    if not mpn or len(mpn) < 4:
+        return False
+    if mpn.isdigit():          # 数字のみは誤ヒット率が高すぎる
+        return False
+    if _norm(mpn) in GENERIC_MPN:
+        return False
+    return True
+
+
+def _keepa_get(endpoint: str, params: dict, retry: int = 3):
+    """Keepa API共通リクエスト（429は指数バックオフ、トークン枯渇は補充待ち）"""
+    if not KEEPA_API_KEY:
+        return None
     for attempt in range(retry):
         try:
             resp = requests.get(
-                "https://api.keepa.com/search",
-                params={
-                    "key":    KEEPA_API_KEY,
-                    "domain": domain,
-                    "type":   "product",
-                    "term":   mpn,
-                },
+                f"https://api.keepa.com/{endpoint}",
+                params={"key": KEEPA_API_KEY, **params},
                 timeout=15,
             )
             if resp.status_code == 429:
+                # tokensLeft/refillIn が返っていれば補充まで待つ
                 wait = 30 * (2 ** attempt)
-                print(f"  ⚠ Keepaレートリミット。{wait}秒待機... ({attempt+1}/{retry})")
+                try:
+                    body = resp.json()
+                    refill_ms = body.get("refillIn", 0)
+                    if refill_ms:
+                        wait = max(wait, refill_ms / 1000 + 1)
+                except Exception:
+                    pass
+                print(f"  ⚠ Keepaレートリミット。{wait:.0f}秒待機... ({attempt+1}/{retry})")
                 time.sleep(wait)
                 continue
             if not resp.ok:
-                print(f"  ⚠ Keepa Search エラー {resp.status_code}: {resp.text[:100]}")
-                return ""
-
-            data = resp.json()
-            products = data.get("products", [])
-            if products:
-                asin = products[0].get("asin", "")
-                if asin:
-                    tokens_left = data.get("tokensLeft", "?")
-                    print(f"  🔍 MPN→ASIN: {mpn} → {asin}  (残トークン: {tokens_left})")
-                    return asin
-            print(f"  — MPN→ASIN: {mpn} → 該当なし")
-            return ""
+                print(f"  ⚠ Keepa エラー {resp.status_code}: {resp.text[:100]}")
+                return None
+            return resp.json()
         except Exception as e:
             if attempt < retry - 1:
                 print(f"  ⚠ Keepa接続エラー、リトライ ({attempt+1}/{retry}): {e}")
                 time.sleep(5)
             else:
                 print(f"  ⚠ Keepa接続エラー: {e}")
+    return None
+
+
+def gtin_to_asin(gtin: str, domain: str = "5") -> str:
+    """
+    Keepa /product に JAN/EAN/UPC を直接渡してASINを取得する。
+    検索（/search）と違いコード照会なので誤ヒットがほぼない。
+    """
+    code = re.sub(r"\D", "", gtin)
+    if len(code) not in (8, 12, 13, 14):
+        return ""
+
+    data = _keepa_get("product", {"domain": domain, "code": code})
+    if not data:
+        return ""
+
+    products = data.get("products") or []
+    if products:
+        asin = products[0].get("asin", "")
+        if asin:
+            print(f"  🔍 GTIN→ASIN: {gtin} → {asin}  (残トークン: {data.get('tokensLeft', '?')})")
+            return asin
+    print(f"  — GTIN→ASIN: {gtin} → 該当なし")
     return ""
 
 
+def mpn_to_asin(mpn: str, domain: str = "5") -> tuple:
+    """
+    Keepa /search でMPN→ASINを逆引きし、KeepaのpartNumber/modelと照合して検証する。
+    戻り値: (asin, status)
+      status: "MPN一致" / "MPN不一致(要確認)" / ""（該当なし・エラー）
+    """
+    data = _keepa_get("search", {"domain": domain, "type": "product", "term": mpn})
+    if not data:
+        return "", ""
+
+    products = data.get("products") or []
+    if not products:
+        print(f"  — MPN→ASIN: {mpn} → 該当なし")
+        return "", ""
+
+    p    = products[0]
+    asin = p.get("asin", "")
+    if not asin:
+        return "", ""
+
+    # Keepa側の型番情報と照合（表記ゆれは正規化して吸収）
+    q           = _norm(mpn)
+    keepa_pn    = _norm(p.get("partNumber", ""))
+    keepa_model = _norm(p.get("model", ""))
+
+    matched = bool(q) and (
+        q == keepa_pn or q == keepa_model
+        or (keepa_pn and (q in keepa_pn or keepa_pn in q))
+        or (keepa_model and (q in keepa_model or keepa_model in q))
+    )
+    status = "MPN一致" if matched else "MPN不一致(要確認)"
+
+    print(f"  🔍 MPN→ASIN: {mpn} → {asin} [{status}]  (残トークン: {data.get('tokensLeft', '?')})")
+    return asin, status
+
+
 def enrich_with_asin(items: list, domain: str = "5") -> list:
-    """MPNを持つアイテムにASINを付与する（重複MPNはキャッシュで節約）"""
-    mpn_cache: dict[str, str] = {}
+    """
+    アイテムにASINを付与する。
+      優先1: GTIN（Keepa code照会 — 正確）
+      優先2: MPN（Keepa検索 — partNumber/model照合つき）
+    重複コード/MPNはキャッシュでKeepaトークンを節約。
+    """
+    gtin_cache: dict[str, str]  = {}
+    mpn_cache:  dict[str, tuple] = {}
+    amazon_base = "https://www.amazon.co.jp/dp/" if domain == "5" else "https://www.amazon.com/dp/"
+
     for item in items:
-        mpn = item.get("mpn", "")
-        if not mpn:
-            continue
-        if mpn not in mpn_cache:
-            mpn_cache[mpn] = mpn_to_asin(mpn, domain=domain)
-            time.sleep(1)  # Keepaレートリミット対策
-        asin = mpn_cache[mpn]
-        item["asin"] = asin
+        gtin = item.get("gtin", "").strip()
+        mpn  = item.get("mpn", "").strip()
+        asin, source = "", ""
+
+        # --- 優先1: GTINで直接照会 ---
+        if gtin:
+            if gtin not in gtin_cache:
+                gtin_cache[gtin] = gtin_to_asin(gtin, domain=domain)
+                time.sleep(1)
+            asin = gtin_cache[gtin]
+            if asin:
+                source = "GTIN一致"
+
+        # --- 優先2: MPN検索（GTINで取れなかった場合のみ） ---
+        if not asin and mpn:
+            if not is_searchable_mpn(mpn):
+                source = "MPN汎用値のためスキップ"
+            else:
+                if mpn not in mpn_cache:
+                    mpn_cache[mpn] = mpn_to_asin(mpn, domain=domain)
+                    time.sleep(1)
+                asin, source = mpn_cache[mpn]
+
+        item["asin"]        = asin
+        item["asin_source"] = source
         if asin:
-            item["amazon_url"] = f"https://www.amazon.co.jp/dp/{asin}"
+            item["amazon_url"] = amazon_base + asin
     return items
 
 
@@ -336,6 +442,8 @@ def print_item(i, total, item):
     print(f"  MPN      : {item['mpn'] or '—'}")
     print(f"  GTIN     : {item['gtin'] or '—'}")
     print(f"  ASIN     : {item['asin'] or '—'}")
+    if item.get("asin_source"):
+        print(f"  判定     : {item['asin_source']}")
     if item['asin']:
         print(f"  Amazon   : {item['amazon_url']}")
     print(f"  カテゴリ : {item['category']}")
@@ -345,7 +453,7 @@ def print_item(i, total, item):
 
 
 FIELDNAMES = ["item_id", "title", "price_usd", "condition",
-              "mpn", "gtin", "asin", "amazon_url",
+              "mpn", "gtin", "asin", "asin_source", "amazon_url",
               "category", "seller", "sold_date", "url"]
 
 
@@ -386,7 +494,7 @@ def main():
     args = sys.argv[1:]
     if not args or args[0].startswith("--"):
         print("使い方: python3 ebay_mpn_scraper.py <セラーID or URL> [オプション]")
-        print("オプション: --max N / --dry-run / --csv / --no-sheets")
+        print("オプション: --max N / --dry-run / --csv / --no-sheets / --domain N")
         sys.exit(1)
 
     target    = args[0]
@@ -411,7 +519,7 @@ def main():
         base_url = build_seller_url(target)
         label    = f"セラーID: {target}"
 
-    print("=== eBay MPN → ASIN スクレイパー ===")
+    print("=== eBay MPN/GTIN → ASIN スクレイパー ===")
     print(label)
     print(f"上限: {max_items}件 / Keepa domain: {domain} (5=JP, 1=US)")
     print()
@@ -437,26 +545,35 @@ def main():
         if data:
             item = parse_item(data, item_id)
             items.append(item)
-            mpn_status = f"✅ {item['mpn']}" if item["mpn"] else "— (MPNなし)"
-            print(f"[{i}/{total}] {item['title'][:60]}  MPN: {mpn_status}")
+            code_status = []
+            if item["gtin"]:
+                code_status.append(f"GTIN:{item['gtin']}")
+            if item["mpn"]:
+                code_status.append(f"MPN:{item['mpn']}")
+            print(f"[{i}/{total}] {item['title'][:60]}  {' / '.join(code_status) or '— (コードなし)'}")
         else:
             print(f"[{i}/{total}] {item_id} → API取得失敗")
         time.sleep(0.8)
 
-    mpn_count = sum(1 for it in items if it["mpn"])
-    print(f"\n→ {len(items)}件取得 / MPN取得: {mpn_count}件\n")
+    mpn_count  = sum(1 for it in items if it["mpn"])
+    gtin_count = sum(1 for it in items if it["gtin"])
+    print(f"\n→ {len(items)}件取得 / GTIN: {gtin_count}件 / MPN: {mpn_count}件\n")
 
-    # Step 3: Keepa MPN→ASIN変換
-    if KEEPA_API_KEY and mpn_count > 0:
-        print("KeepaでMPN→ASIN変換中...")
+    # Step 3: Keepa ASIN逆引き（GTIN優先 → MPNフォールバック）
+    if KEEPA_API_KEY and (gtin_count > 0 or mpn_count > 0):
+        print("KeepaでASIN逆引き中... (GTIN優先 → MPNフォールバック)")
         items = enrich_with_asin(items, domain=domain)
-        asin_count = sum(1 for it in items if it["asin"])
-        print(f"\n→ ASIN取得: {asin_count}/{mpn_count}件\n")
+        asin_count      = sum(1 for it in items if it["asin"])
+        by_gtin         = sum(1 for it in items if it["asin_source"] == "GTIN一致")
+        by_mpn_ok       = sum(1 for it in items if it["asin_source"] == "MPN一致")
+        by_mpn_unsure   = sum(1 for it in items if it["asin_source"] == "MPN不一致(要確認)")
+        print(f"\n→ ASIN取得: {asin_count}件 "
+              f"(GTIN: {by_gtin} / MPN一致: {by_mpn_ok} / 要確認: {by_mpn_unsure})\n")
     else:
         if not KEEPA_API_KEY:
             print("⚠ KEEPA_API_KEY 未設定のためASIN変換をスキップ")
-        elif mpn_count == 0:
-            print("⚠ MPNが取得できなかったためASIN変換をスキップ")
+        else:
+            print("⚠ GTIN・MPNが取得できなかったためASIN変換をスキップ")
 
     # 結果表示
     print(f"\n{'='*60}")
@@ -466,7 +583,7 @@ def main():
 
     print(f"\n{'='*60}")
     asin_count = sum(1 for it in items if it["asin"])
-    print(f"完了: {len(items)}件 / MPN: {mpn_count}件 / ASIN: {asin_count}件")
+    print(f"完了: {len(items)}件 / GTIN: {gtin_count}件 / MPN: {mpn_count}件 / ASIN: {asin_count}件")
 
     if to_sheets and items:
         save_to_sheets(items, dry_run=dry_run)

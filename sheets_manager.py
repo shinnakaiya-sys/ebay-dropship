@@ -305,6 +305,17 @@ class SheetsManager:
             pass
         return None
 
+    def update_amazon_price(self, identifier: str, price_jpy: int) -> bool:
+        """仕入れ基準価格（E列）と最終チェック日（H列）を更新"""
+        ws = self.sheet.worksheet(SHEET_MASTER)
+        cell = self._find_asin_cell(ws, identifier)
+        if not cell:
+            return False
+        today = datetime.now(_JST).strftime("%Y-%m-%d %H:%M")
+        ws.update_cell(cell.row, 5, price_jpy)  # E列: 仕入れ基準価格
+        ws.update_cell(cell.row, 8, today)       # H列: 最終チェック日
+        return True
+
     def update_weight(self, asin: str, weight_kg: float):
         """請求重量をQ列（17列目）に更新"""
         ws = self.sheet.worksheet(SHEET_MASTER)

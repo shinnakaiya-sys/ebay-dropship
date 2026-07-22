@@ -46,7 +46,7 @@ CONFIG = {
     # ── 価格・通貨設定 ───────────────────────────
     "JPY_TO_USD":       _fetch_jpy_rate(fallback=155.0),  # 起動時に自動取得
     "EBAY_FEE_RATE":    0.15,     # eBay手数料 15%
-    "TARIFF_RATE":      0.10,     # 関税 10%
+    "TARIFF_RATE":      0.15,     # 関税 10%
     "TARGET_MARGIN":    0.01,     # 目標利益率 1%
 
     # ── 販売価格下限 ─────────────────────────────

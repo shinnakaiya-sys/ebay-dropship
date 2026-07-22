@@ -157,7 +157,7 @@ def main():
             # ケース①: Amazon在庫切れ → eBay数量を0に更新（出品は残す）
             if not amazon_in_stock and ebay_available:
                 ebay.update_quantity(ebay_id, 0)
-                sheets.update_status(asin, "在庫数0")
+                sheets.update_status(asin, "在庫切れ停止")
                 alerts.append({
                     "type": "⛔ 在庫切れ",
                     "asin": asin,
@@ -170,7 +170,7 @@ def main():
 
             if not amazon_in_stock and not ebay_available:
                 # 既に数量0 → シートステータスだけ合わせる
-                sheets.update_status(asin, "在庫数0")
+                sheets.update_status(asin, "在庫切れ停止")
                 print(f"  ⛔ 在庫切れ（既に数量0）")
                 continue
 

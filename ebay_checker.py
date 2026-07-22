@@ -256,12 +256,14 @@ class EbayChecker:
             if product_name:
                 search_attempts.append({"q": product_name[:80]})       # 3. 商品名フォールバック
 
+            last_query_params = None
             for attempt_params in search_attempts:
                 items, total_entries = self._browse_search_all(
                     token, attempt_params,
                     extra_filter="itemLocationCountry:JP",
                 )
                 if items:
+                    last_query_params = attempt_params
                     break  # 結果が得られたら終了
             else:
                 return {"lowest_price": 0.0, "count": 0, "my_rank": None}
@@ -288,10 +290,10 @@ class EbayChecker:
                         lowest_competitor = total
 
             # 広域検索でセラーが見つからない場合、セラー専用検索で補完して順位を逆算
-            if seller_id and my_rank is None:
+            if seller_id and my_rank is None and last_query_params:
                 seller_filter = f"itemLocationCountry:JP,sellers:{{{seller_id}}}"
                 seller_items, _ = self._browse_search_all(
-                    token, query_params,
+                    token, last_query_params,
                     extra_filter=seller_filter,
                     max_items=10,
                 )
