@@ -93,6 +93,20 @@ class SheetsManager:
         self._init_sheets()
 
     # ──────────────────────────────────────────────────────
+    # Sheets API は稀に 503 (一時的な利用不可) を返すためリトライする
+    # ──────────────────────────────────────────────────────
+    def _get_worksheet(self, title: str, retries: int = 3, delay: int = 30):
+        for attempt in range(retries):
+            try:
+                return self.sheet.worksheet(title)
+            except gspread.exceptions.APIError as e:
+                if attempt < retries - 1:
+                    print(f"  ⚠️  Sheets APIエラー、{delay}秒後にリトライ ({attempt + 1}/{retries}): {e}")
+                    time.sleep(delay)
+                else:
+                    raise
+
+    # ──────────────────────────────────────────────────────
     # シート初期化（存在しない場合に作成）
     # ──────────────────────────────────────────────────────
     def _init_sheets(self):
@@ -104,7 +118,7 @@ class SheetsManager:
             print(f"  📄 シート作成: {SHEET_MASTER}")
         else:
             # ヘッダー行を常に MASTER_COLS に合わせて更新
-            ws = self.sheet.worksheet(SHEET_MASTER)
+            ws = self._get_worksheet(SHEET_MASTER)
             headers = ws.row_values(1)
             end_col = _col_letter(len(MASTER_COLS))
             if headers != MASTER_COLS:
@@ -147,7 +161,7 @@ class SheetsManager:
     # ──────────────────────────────────────────────────────
     def get_active_products(self) -> list[dict]:
         """ステータスが「出品中」または「在庫切れ停止」の商品を返す"""
-        ws = self.sheet.worksheet(SHEET_MASTER)
+        ws = self._get_worksheet(SHEET_MASTER)
         rows = ws.get_all_values()
         if len(rows) < 2:
             return []
@@ -166,14 +180,14 @@ class SheetsManager:
     # ──────────────────────────────────────────────────────
     def update_last_checked(self, asin: str):
         """最終チェック日のみ更新（変動なし時に使用）"""
-        ws = self.sheet.worksheet(SHEET_MASTER)
+        ws = self._get_worksheet(SHEET_MASTER)
         cell = self._find_asin_cell(ws, asin)
         if cell:
             today = datetime.now(_JST).strftime("%Y-%m-%d %H:%M")
             ws.update_cell(cell.row, 8, today)
 
     def update_status(self, asin: str, status: str):
-        ws = self.sheet.worksheet(SHEET_MASTER)
+        ws = self._get_worksheet(SHEET_MASTER)
         cell = self._find_asin_cell(ws, asin)
         if cell:
             today = datetime.now(_JST).strftime("%Y-%m-%d %H:%M")
@@ -184,7 +198,7 @@ class SheetsManager:
     # 商品マスタ: 価格更新
     # ──────────────────────────────────────────────────────
     def update_price(self, asin: str, amazon_price: float, ebay_price: float):
-        ws = self.sheet.worksheet(SHEET_MASTER)
+        ws = self._get_worksheet(SHEET_MASTER)
         cell = self._find_asin_cell(ws, asin)
         if cell:
             today = datetime.now(_JST).strftime("%Y-%m-%d %H:%M")
@@ -196,7 +210,7 @@ class SheetsManager:
     # 価格履歴: ログ追記
     # ──────────────────────────────────────────────────────
     def log_price(self, asin: str, platform: str, price: float, in_stock: bool):
-        ws = self.sheet.worksheet(SHEET_PRICE)
+        ws = self._get_worksheet(SHEET_PRICE)
         today = datetime.now(_JST).strftime("%Y-%m-%d")
         row = [today, asin, platform, price, "在庫あり" if in_stock else "在庫なし"]
         for attempt in range(3):
@@ -215,7 +229,7 @@ class SheetsManager:
     def write_alerts(self, alerts: list[dict]):
         if not alerts:
             return
-        ws = self.sheet.worksheet(SHEET_ALERT)
+        ws = self._get_worksheet(SHEET_ALERT)
         now = datetime.now(_JST).strftime("%Y-%m-%d %H:%M")
         rows = [
             [now, a["type"], a["asin"], a["ebay_id"], a["product"], a["message"]]
@@ -235,7 +249,7 @@ class SheetsManager:
     # サマリー: 実行結果を記録
     # ──────────────────────────────────────────────────────
     def write_summary(self, total: int, alerts: list[dict]):
-        ws = self.sheet.worksheet(SHEET_SUMMARY)
+        ws = self._get_worksheet(SHEET_SUMMARY)
         now = datetime.now(_JST).strftime("%Y-%m-%d %H:%M")
         out_of_stock = sum(1 for a in alerts if "在庫切れ" in a["type"])
         price_update  = sum(1 for a in alerts if "価格変動" in a["type"])
@@ -248,7 +262,7 @@ class SheetsManager:
     # ──────────────────────────────────────────────────────
     def get_pending_products(self) -> list[dict]:
         """ステータスが「待機中」または「スキップ（在庫なし）」の商品を返す（JANコード対応）"""
-        ws = self.sheet.worksheet(SHEET_PENDING)
+        ws = self._get_worksheet(SHEET_PENDING)
         records = ws.get_all_records()
         retryable = {"待機中", "スキップ（在庫なし）"}
         return [r for r in records if r.get("ステータス") in retryable and r.get("JANコード")]
@@ -257,7 +271,7 @@ class SheetsManager:
     # 出品待ちリスト: ステータス更新
     # ──────────────────────────────────────────────────────
     def update_pending_status(self, asin: str, status: str):
-        ws = self.sheet.worksheet(SHEET_PENDING)
+        ws = self._get_worksheet(SHEET_PENDING)
         cell = self._find_asin_cell(ws, asin)
         if cell:
             ws.update_cell(cell.row, 2, status)  # B列: ステータス
@@ -266,7 +280,7 @@ class SheetsManager:
     # 出品待ちリスト: 商品を追加
     # ──────────────────────────────────────────────────────
     def add_pending(self, asin: str, memo: str = ""):
-        ws = self.sheet.worksheet(SHEET_PENDING)
+        ws = self._get_worksheet(SHEET_PENDING)
         today = datetime.now(_JST).strftime("%Y-%m-%d")
         ws.append_row([asin, "待機中", today, memo])
         print(f"  ➕ 出品待ちに追加: {asin}")
@@ -277,7 +291,7 @@ class SheetsManager:
     def add_product(self, asin: str, ebay_id: str, name: str,
                     base_price: float, ebay_price: float, memo: str = "",
                     jan_code: str = ""):
-        ws = self.sheet.worksheet(SHEET_MASTER)
+        ws = self._get_worksheet(SHEET_MASTER)
         today = datetime.now(_JST).strftime("%Y-%m-%d")
         row_data = [
             jan_code, asin, ebay_id, name, base_price, ebay_price,
@@ -295,7 +309,7 @@ class SheetsManager:
     def get_weight_from_research(self, jan_code: str) -> float | None:
         """新品リサーチタブのM列（請求重量kg）からJANコードで重量を取得"""
         try:
-            ws   = self.sheet.worksheet(SHEET_RESEARCH)
+            ws   = self._get_worksheet(SHEET_RESEARCH)
             cell = ws.find(str(jan_code), in_column=1)
             if cell:
                 val = ws.cell(cell.row, 13).value  # M列=13
@@ -307,7 +321,7 @@ class SheetsManager:
 
     def update_amazon_price(self, identifier: str, price_jpy: int) -> bool:
         """仕入れ基準価格（E列）と最終チェック日（H列）を更新"""
-        ws = self.sheet.worksheet(SHEET_MASTER)
+        ws = self._get_worksheet(SHEET_MASTER)
         cell = self._find_asin_cell(ws, identifier)
         if not cell:
             return False
@@ -318,21 +332,21 @@ class SheetsManager:
 
     def update_weight(self, asin: str, weight_kg: float):
         """請求重量をQ列（17列目）に更新"""
-        ws = self.sheet.worksheet(SHEET_MASTER)
+        ws = self._get_worksheet(SHEET_MASTER)
         cell = self._find_asin_cell(ws, asin)
         if cell:
             ws.update_cell(cell.row, 17, weight_kg)
 
     def update_my_rank(self, asin: str, rank):
         """自分の順位をN列（14列目）に更新"""
-        ws = self.sheet.worksheet(SHEET_MASTER)
+        ws = self._get_worksheet(SHEET_MASTER)
         cell = self._find_asin_cell(ws, asin)
         if cell:
             ws.update_cell(cell.row, 14, rank if rank is not None else "")  # N列
 
     def update_rival_price(self, asin: str, lowest_price: float, count: int):
         """競合最安値・競合出品数を更新（J・K列）"""
-        ws = self.sheet.worksheet(SHEET_MASTER)
+        ws = self._get_worksheet(SHEET_MASTER)
         cell = self._find_asin_cell(ws, asin)
         if cell:
             ws.update_cell(cell.row, 10, lowest_price if lowest_price > 0 else "")  # J列
@@ -370,7 +384,7 @@ class SheetsManager:
         シートが存在しない・空の場合は空辞書を返す。
         """
         try:
-            ws = self.sheet.worksheet(SHEET_SETTINGS)
+            ws = self._get_worksheet(SHEET_SETTINGS)
             rows = ws.get_all_values()
             if len(rows) < 2:
                 return {}
@@ -393,7 +407,7 @@ class SheetsManager:
 
     def update_pending_status_by_jan(self, jan_code: str, status: str):
         """出品待ちリストのJANコード行のステータスを更新"""
-        ws = self.sheet.worksheet(SHEET_PENDING)
+        ws = self._get_worksheet(SHEET_PENDING)
         cell = self._find_jan_cell(ws, jan_code)
         if cell:
             ws.update_cell(cell.row, 2, status)

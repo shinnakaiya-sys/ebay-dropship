@@ -40,3 +40,8 @@ ebay_session/
 ebay_session_*/
 .wdm/
 debug_*.png
+
+# PR動画生成の作業ファイル・出力データ
+pr_video_work/
+improve_2_clicks_no_conversion.csv
+pr_video_targets_clicknoconv14.csv

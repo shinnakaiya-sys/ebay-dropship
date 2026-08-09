@@ -1,19 +1,22 @@
 """
 mpn_research.py
 ===============
-ライバルセラーの販売履歴からMPNを自動収集し、4ステップでリサーチを一括実行する。
+ライバルセラーの販売履歴からMPNを自動収集し、JANコードを特定して
+jan_research.py の本体リサーチ（Terapeak・Keepa・eBay最安値・利益計算）に連結する。
 
 === Phase 1（--seller / --seller-list 指定時）: eBay販売履歴からMPN収集 ===
   1a. Selenium で販売済み商品のItem IDリストを収集
   1b. eBay Browse API で各商品のMPN・GTINを取得
 
-=== Phase 2: MPNリサーチ（4ステップ）===
-Step 1: Terapeak で過去30日の販売数確認
-        → SOLD_THRESHOLD 未満なら ❌ 販売実績不足 としてスキップ
-Step 2: Keepa でMPN→ASIN→Amazon.co.jp 仕入れ価格取得
-        （/search でASIN照合 → /product で価格・重量取得）
-Step 3: eBay Active Listings 最安値・URL取得（新品のみ）
-Step 4: 利益計算 → GO/No-Go判定
+=== Phase 2: MPN → JANコード特定 → jan_research.py に委譲 ===
+  ① 既知のJAN（Phase 1でGTINとして収集済み）があればそれを使用
+  ② eBay Browse APIでMPNを検索し、日本製JAN(GTIN)を探す
+  ③ ①②で見つからなければ、Keepa /search でMPN→ASINを照合し、
+     /product のEAN/UPCリストから日本製JANコードを抽出する
+  ④ JANが特定できたら jan_research.research_one() を呼び出し、
+     Terapeak販売実績確認・Keepa仕入れ価格取得・eBay最安値取得・利益計算・
+     スプレッドシート書き込みまでを一括で実行する
+  JANが特定できないMPNはスキップする。
 
 使い方:
   # MPN直接指定
@@ -39,17 +42,16 @@ Step 4: 利益計算 → GO/No-Go判定
 import os
 import re
 import sys
-import math
 import time
 import base64
 import requests
-from datetime import datetime
 from dotenv import dotenv_values, load_dotenv
 load_dotenv()
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+from google.oauth2.service_account import Credentials
+import jan_research
 try:
-    from terapeak_research import create_driver, do_research, extract_rows, set_ship_to_us
+    from terapeak_research import create_driver, set_ship_to_us
     TERAPEAK_AVAILABLE = True
 except ImportError:
     TERAPEAK_AVAILABLE = False
@@ -57,59 +59,14 @@ except ImportError:
 # ==========================================
 # 設定
 # ==========================================
-BASE_DIR       = os.path.dirname(os.path.abspath(__file__))
-CLIENT_ID      = os.getenv("EBAY_CLIENT_ID") or os.getenv("EBAY_APP_ID", "")
-CLIENT_SECRET  = os.getenv("EBAY_CLIENT_SECRET", "")
-SPREADSHEET_ID = "1GEGnGQtb5Fb76W9Nyd5gGM-igQAe1-U9-W2nmhVjaB8"
-TAB_NAME       = "MPN_リサーチ"
-JSON_FILE      = os.path.join(BASE_DIR, "credentials.json")
-SCOPE          = ["https://spreadsheets.google.com/feeds",
-                  "https://www.googleapis.com/auth/drive"]
-
-SOLD_THRESHOLD = 1      # Step 1: 最低販売数（これ未満はスキップ）
-EBAY_FEE_RATE  = 0.15   # eBay手数料 15%
-CUSTOMS_RATE   = 0.15   # 関税（仕入れ価格の15%）
-MIN_PROFIT_JPY = 10     # GOと判定する最低利益ライン（円）
+BASE_DIR      = os.path.dirname(os.path.abspath(__file__))
+CLIENT_ID     = os.getenv("EBAY_CLIENT_ID") or os.getenv("EBAY_APP_ID", "")
+CLIENT_SECRET = os.getenv("EBAY_CLIENT_SECRET", "")
 
 # eBayでよく入力される「意味のないMPN」— これらはスキップ
 GENERIC_MPN = {
     "DOESNOTAPPLY", "NOTAPPLY", "NA", "NONE", "UNKNOWN", "GENERIC",
     "BLACK", "WHITE", "RED", "BLUE", "SILVER", "GOLD", "JAPAN", "ORIGINAL",
-}
-
-# ==========================================
-# SpeedPAK Economy Japan 送料表（USA本土48州）
-# 出典: .company/ebay-research/speedpak-economy-rates.md（2026年3月25日改定）
-# ==========================================
-_SPEEDPAK_US48 = [
-    (0.1, 1227), (0.2, 1367), (0.3, 1581), (0.4, 1778), (0.5, 2060),
-    (0.6, 2222), (0.7, 2321), (0.8, 2703), (0.9, 2820), (1.0, 3020),
-    (1.1, 3136), (1.2, 3250), (1.3, 3366), (1.4, 3704), (1.5, 3816),
-    (1.6, 3935), (1.7, 4046), (1.8, 4165), (1.9, 5056), (2.0, 5245),
-    (2.5, 5582), (3.0, 6333), (3.5, 6958), (4.0, 7704), (4.5, 9135),
-    (5.0, 11733), (5.5, 12500), (6.0, 13335), (6.5, 14160), (7.0, 15209),
-    (7.5, 16058), (8.0, 16893), (8.5, 17562), (9.0, 18152), (9.5, 19106),
-    (10.0, 19639), (10.5, 20276), (11.0, 20864), (11.5, 21565), (12.0, 22199),
-    (12.5, 22887), (13.0, 23466), (13.5, 24054), (14.0, 24869), (14.5, 25200),
-    (15.0, 25988), (15.5, 26656), (16.0, 28149), (16.5, 28775), (17.0, 29495),
-    (17.5, 30196), (18.0, 30902), (18.5, 31478), (19.0, 32204), (19.5, 32936),
-    (20.0, 33947), (20.5, 34655), (21.0, 35426), (21.5, 36145), (22.0, 36859),
-    (22.5, 37602), (23.0, 38516), (23.5, 39084), (24.0, 39678), (24.5, 40374),
-    (25.0, 40955),
-]
-
-US_CUSTOMS_CLEARANCE_FEE   = 245    # 米国輸入通関手数料（円/件）
-US_CUSTOMS_PROCESSING_RATE = 0.021  # 米国関税処理手数料（関税額の2.1%）
-DEFAULT_WEIGHT_KG          = 0.5    # 重量不明時のデフォルト（kg）
-
-AMAZON_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "ja-JP,ja;q=0.9",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
 
 
@@ -132,16 +89,59 @@ def is_searchable_mpn(mpn: str) -> bool:
     return True
 
 
-# ==========================================
-# SpeedPAK 送料取得
-# ==========================================
-def get_speedpak_rate_us48(weight_kg: float) -> int:
-    """請求重量(kg)からSpeedPAK Economy USA本土48州の基本送料(JPY)を返す。"""
-    weight_kg = math.ceil(weight_kg * 1000) / 1000
-    for limit, price in _SPEEDPAK_US48:
-        if weight_kg <= limit:
-            return price
-    return _SPEEDPAK_US48[-1][1]
+def is_japan_jan(code: str) -> bool:
+    """13桁・45/49始まりの日本製JANコードか判定"""
+    return bool(code) and len(code) == 13 and code.isdigit() and (
+        code.startswith("45") or code.startswith("49"))
+
+
+def search_jan_by_mpn(mpn: str) -> str:
+    """eBay Browse APIでMPNをキーワード検索し、日本製JANコード(GTIN)を探す。"""
+    token = _get_browse_token()
+    if not token:
+        return ""
+    try:
+        r = requests.get(
+            "https://api.ebay.com/buy/browse/v1/item_summary/search",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"q": mpn, "limit": 10, "filter": "itemLocationCountry:JP"},
+            timeout=10,
+        )
+        if not r.ok:
+            return ""
+        for item in r.json().get("itemSummaries", []):
+            gtin = (item.get("gtin") or "").strip()
+            if gtin and is_japan_jan(gtin):
+                return gtin
+    except Exception:
+        pass
+    return ""
+
+
+def get_jan_for_mpn(mpn: str, known_jan: str = "") -> tuple[str, str]:
+    """
+    MPNからJANコードを特定する。優先順位:
+      ① Phase 1で収集済みのJAN（GTIN）
+      ② eBay Browse APIでMPNを検索し、日本製JAN(GTIN)を探す
+      ③ ①②で見つからなければ、Keepa(ASIN経由のEAN/UPCリスト)で探す
+    戻り値: (JANコード, ASIN)。ASINはKeepa経由で特定できた場合のみ設定。
+    """
+    if known_jan and is_japan_jan(known_jan):
+        return known_jan, ""
+
+    jan = search_jan_by_mpn(mpn)
+    if jan:
+        print(f"        JAN: {jan}（eBay Browse APIより特定）")
+        return jan, ""
+
+    keepa_key = _get_keepa_api_key()
+    if not keepa_key:
+        return "", ""
+
+    asin, jan, match_status = find_asin_and_jan_by_mpn(mpn, keepa_key)
+    if jan:
+        print(f"        JAN: {jan}（Keepa ASIN {asin} のEAN/UPCより特定, {match_status}）")
+    return jan, asin
 
 
 # ==========================================
@@ -316,12 +316,12 @@ def _scrape_sold_ids(seller_id_or_url: str, max_items: int) -> list[str]:
     return item_ids[:max_items]
 
 
-def scrape_mpns_from_seller(seller_id_or_url: str, max_items: int = 50) -> list[str]:
+def scrape_mpns_from_seller(seller_id_or_url: str, max_items: int = 50) -> list[tuple[str, str]]:
     """
     セラーの販売履歴からMPNを収集して返す。
       Phase 1a: Selenium で Item ID リスト収集
       Phase 1b: Browse API で各アイテムの MPN を取得
-    有効なMPN（重複除去済み）のリストを返す。
+    有効な (MPN, JAN) のタプルリスト（重複除去済み。JAN不明時は空文字）を返す。
     """
     print(f"\n{'─'*55}")
     print(f"  [Phase 1a] Item ID収集: {seller_id_or_url}")
@@ -361,13 +361,14 @@ def scrape_mpns_from_seller(seller_id_or_url: str, max_items: int = 50) -> list[
 
         time.sleep(0.8)
 
-    unique_mpns = list(mpn_set.keys())
-    print(f"\n  → MPN収集完了: {len(item_ids)}件中 {len(unique_mpns)}件の有効MPN")
+    mpn_jan_pairs = [(mpn, gtin if is_japan_jan(gtin) else "")
+                     for mpn, (title, gtin) in mpn_set.items()]
+    print(f"\n  → MPN収集完了: {len(item_ids)}件中 {len(mpn_jan_pairs)}件の有効MPN")
     for mpn, (title, gtin) in mpn_set.items():
         gtin_note = f" (GTIN:{gtin})" if gtin else ""
         print(f"    {mpn}{gtin_note}  ← {title[:40]}")
 
-    return unique_mpns
+    return mpn_jan_pairs
 
 
 # ==========================================
@@ -415,10 +416,10 @@ def get_usd_jpy_rate() -> float:
 
 
 # ==========================================
-# Keepa: ASIN から商品詳細取得（価格・重量）
+# Keepa: ASIN から商品詳細取得（EAN/UPCリスト含む）
 # ==========================================
-def _keepa_product_by_asin(asin: str, api_key: str) -> tuple[str | None, str | None, float | None]:
-    """Keepa /product でASIN→(商品名, 価格文字列, 重量kg)を返す。"""
+def _keepa_product_by_asin(asin: str, api_key: str) -> dict:
+    """Keepa /product でASIN→商品詳細（生データ）を返す。取得失敗時は空dict。"""
     try:
         resp = requests.get(
             "https://api.keepa.com/product",
@@ -433,54 +434,29 @@ def _keepa_product_by_asin(asin: str, api_key: str) -> tuple[str | None, str | N
         )
         resp.raise_for_status()
         products = resp.json().get("products", [])
-        if not products:
-            return None, None, None
-
-        p         = products[0]
-        title     = p.get("title") or None
-        current   = (p.get("stats") or {}).get("current") or []
-        price_raw = -1
-        for idx in [0, 1]:
-            if len(current) > idx and current[idx] and current[idx] > 0:
-                price_raw = current[idx]
-                break
-        price_str = f"¥{price_raw:,}" if price_raw > 0 else None
-
-        weight_kg  = None
-        pkg_weight = p.get("packageWeight")
-        pkg_length = p.get("packageLength")
-        pkg_width  = p.get("packageWidth")
-        pkg_height = p.get("packageHeight")
-
-        actual_kg = pkg_weight / 1000.0 if pkg_weight and pkg_weight > 0 else None
-        vol_kg    = None
-        if pkg_length and pkg_width and pkg_height and pkg_length > 0:
-            vol_kg = (pkg_length / 10) * (pkg_width / 10) * (pkg_height / 10) / 8000
-
-        if actual_kg is not None and vol_kg is not None:
-            weight_kg = max(actual_kg, vol_kg)
-        elif actual_kg is not None:
-            weight_kg = actual_kg
-        elif vol_kg is not None:
-            weight_kg = vol_kg
-
-        if weight_kg is not None:
-            weight_kg = math.ceil(weight_kg * 1000) / 1000
-
-        return title, price_str, weight_kg
-
+        return products[0] if products else {}
     except Exception as e:
         print(f"  [Keepa/product] エラー: {e}")
-        return None, None, None
+        return {}
+
+
+def _extract_jp_jan(product: dict) -> str:
+    """Keepa商品データのEAN/UPCリストから日本製JANコードを抽出する。"""
+    codes = (product.get("eanList") or []) + (product.get("upcList") or [])
+    for code in codes:
+        if is_japan_jan(code):
+            return code
+    return ""
 
 
 # ==========================================
-# Step 2: Keepa でMPN→商品情報取得
+# MPN → ASIN → JANコード特定
 # ==========================================
-def get_keepa_info_by_mpn(mpn: str, api_key: str) -> tuple[str | None, str | None, str | None, float | None, str]:
+def find_asin_and_jan_by_mpn(mpn: str, api_key: str) -> tuple[str, str, str]:
     """
-    Keepa /search でMPN照合→ASIN取得し、/product で価格・重量を取得する。
-    戻り値: (商品名, 価格文字列, Amazon URL, 重量kg, 照合ステータス)
+    Keepa /search でMPN照合→ASIN取得し、/product のEAN/UPCリストから
+    日本製JANコードを抽出する。
+    戻り値: (ASIN, JANコード, 照合ステータス)。見つからない場合は空文字。
     """
     try:
         resp = requests.get(
@@ -494,11 +470,11 @@ def get_keepa_info_by_mpn(mpn: str, api_key: str) -> tuple[str | None, str | Non
         tokens   = data.get("tokensLeft", "?")
     except Exception as e:
         print(f"  [Keepa/search] エラー: {e}")
-        return None, None, None, None, ""
+        return "", "", ""
 
     if not products:
         print(f"  — Keepa: MPN '{mpn}' → 該当なし  (残トークン: {tokens})")
-        return None, None, None, None, ""
+        return "", "", ""
 
     q            = _norm(mpn)
     matched      = None
@@ -518,58 +494,14 @@ def get_keepa_info_by_mpn(mpn: str, api_key: str) -> tuple[str | None, str | Non
     product = matched or products[0]
     asin    = product.get("asin", "")
     if not asin:
-        return None, None, None, None, ""
+        return "", "", ""
 
     print(f"  🔍 Keepa: MPN '{mpn}' → ASIN {asin} [{match_status}]  (残トークン: {tokens})")
     time.sleep(1)
 
-    title, price_str, weight_kg = _keepa_product_by_asin(asin, api_key)
-    url = f"https://www.amazon.co.jp/dp/{asin}"
-    return title, price_str, url, weight_kg, match_status
-
-
-# ==========================================
-# Step 1: Terapeak で販売実績確認
-# ==========================================
-def get_terapeak_sold_count(mpn: str, driver) -> tuple[int, str, float]:
-    """
-    Terapeak（Seller Hub Research）でMPNキーワードを検索し、
-    過去30日の販売数・代表タイトル・加重平均価格(USD)を返す。
-    """
-    print(f"           Teapeakキーワード: {mpn}")
-    try:
-        do_research(driver, keywords=mpn, days=30, min_price=0, category_id="")
-        rows = extract_rows(driver)
-        if not rows:
-            return 0, "", 0.0
-
-        first_title        = rows[0].get("タイトル", "")
-        total              = 0
-        weighted_sum       = 0.0
-        total_sold_for_avg = 0
-        for row in rows:
-            sold_n = int(re.sub(r"[^\d]", "", row.get("総販売数", "0")) or 0)
-            total += sold_n
-            m = re.search(r'[\d.]+', row.get("平均販売価格(USD)", ""))
-            if m and sold_n > 0:
-                weighted_sum       += float(m.group()) * sold_n
-                total_sold_for_avg += sold_n
-
-        avg_usd = weighted_sum / total_sold_for_avg if total_sold_for_avg > 0 else 0.0
-        return total, first_title, avg_usd
-    except Exception as e:
-        print(f"  [Terapeak] 検索エラー: {e}")
-        return 0, "", 0.0
-
-
-# ==========================================
-# Step 3: eBay Active Listings 最安値取得
-# ==========================================
-def _ascii_keywords(title: str) -> str:
-    """日本語タイトルからASCII英数字トークンを抽出してeBay検索用文字列を返す。"""
-    tokens = re.findall(r"[A-Za-z0-9][A-Za-z0-9+\-\.]*", title)
-    tokens = [t for t in tokens if len(t) >= 2]
-    return " ".join(tokens[:8])
+    full_product = _keepa_product_by_asin(asin, api_key)
+    jan = _extract_jp_jan(full_product)
+    return asin, jan, match_status
 
 
 def _create_ebay_driver():
@@ -620,170 +552,13 @@ def _create_ebay_driver():
     return driver
 
 
-def _ebay_search_lowest(driver, keyword: str) -> tuple[float, str]:
-    """eBay検索ページから新品最安値(USD)とURLをSeleniumで取得。"""
-    from selenium.webdriver.common.by import By
-    from urllib.parse import quote_plus
-    url = (f"https://www.ebay.com/sch/i.html"
-           f"?_nkw={quote_plus(keyword)}&_sacat=0"
-           f"&LH_BIN=1&LH_ItemCondition=1000&LH_PrefLoc=2&_sop=15")
-    try:
-        driver.get(url)
-        time.sleep(4)
-
-        items = driver.find_elements(By.CSS_SELECTOR, "ul.srp-results li")
-        if not items:
-            print(f"           [eBay] 検索結果なし（キーワード: {keyword[:40]}）")
-            return 0.0, ""
-
-        for item in items:
-            links = item.find_elements(By.CSS_SELECTOR, "a[href*='/itm/']")
-            if not links:
-                continue
-            href = links[0].get_attribute("href") or ""
-            if not re.search(r"/itm/(?:[^/?#]+/)?(\d{9,})", href):
-                continue
-
-            price = 0.0
-            for sel in ["[class*='s-card__price']", "span.s-item__price"]:
-                for pel in item.find_elements(By.CSS_SELECTOR, sel):
-                    m = re.search(r'\$([0-9,]+\.?\d*)', pel.text)
-                    if m:
-                        price = float(m.group(1).replace(",", ""))
-                        break
-                if price > 0:
-                    break
-            if price <= 0:
-                continue
-
-            return price, href.split("?")[0]
-
-    except Exception as e:
-        print(f"  [eBay Selenium] エラー: {e}")
-    return 0.0, ""
-
-
-def get_ebay_active_lowest(mpn: str, ebay_driver, title_kw: str = "") -> tuple[float, str]:
-    """
-    新品かつ最安値のeBay出品価格(USD)と出品URLを取得。
-    検索順: ① MPN → ② 商品名英数字キーワード
-    """
-    if ebay_driver is None:
-        return 0.0, ""
-
-    if mpn:
-        price, url = _ebay_search_lowest(ebay_driver, mpn)
-        if price:
-            return price, url
-
-    if title_kw:
-        price, url = _ebay_search_lowest(ebay_driver, title_kw)
-        if price:
-            print(f"           (商品名キーワード検索: '{title_kw}')")
-            return price, url
-
-    return 0.0, ""
-
-
-# ==========================================
-# Step 4: 利益計算
-# ==========================================
-def parse_jpy(price_str: str) -> int:
-    """'¥6,645' → 6645"""
-    if not price_str:
-        return 0
-    return int(re.sub(r"[^\d]", "", price_str) or 0)
-
-
-def calc_profit(ebay_usd: float, amazon_jpy: int, rate: float,
-                weight_kg: float | None = None) -> dict:
-    if weight_kg is None or weight_kg <= 0:
-        weight_kg = DEFAULT_WEIGHT_KG
-
-    revenue_jpy    = ebay_usd * rate
-    ebay_fee_jpy   = revenue_jpy * EBAY_FEE_RATE
-    customs_jpy    = amazon_jpy * CUSTOMS_RATE
-    base_shipping  = get_speedpak_rate_us48(weight_kg)
-    us_processing  = round(customs_jpy * US_CUSTOMS_PROCESSING_RATE)
-    total_shipping = base_shipping + US_CUSTOMS_CLEARANCE_FEE + us_processing
-    profit_jpy     = revenue_jpy - amazon_jpy - ebay_fee_jpy - customs_jpy - total_shipping
-
-    return {
-        "revenue_jpy":   round(revenue_jpy),
-        "ebay_fee_jpy":  round(ebay_fee_jpy),
-        "customs_jpy":   round(customs_jpy),
-        "weight_kg":     weight_kg,
-        "base_shipping": base_shipping,
-        "us_clearance":  US_CUSTOMS_CLEARANCE_FEE,
-        "us_processing": us_processing,
-        "shipping_jpy":  total_shipping,
-        "profit_jpy":    round(profit_jpy),
-        "is_go":         profit_jpy >= MIN_PROFIT_JPY,
-    }
-
-
-# ==========================================
-# スプレッドシート書き込み
-# ==========================================
-def write_to_sheet(ws, mpn: str, result: dict, dry_run: bool):
-    """
-    「MPN_リサーチ」タブに1行追記する。
-    列構成（A〜U）:
-      A=MPN, B=商品名, C=タイトル(eBay), D=カテゴリ, E=コンディション,
-      F=販売価格(USD), G=送料, H=返品, I=仕入れ先, J=仕入れ価格(JPY),
-      K=月間Sold数, L=判定, M=Keepa照合, N=請求重量(kg), O=送料(JPY),
-      P=利益(JPY), Q=還付金額(JPY), R=アイテムスペシフィクス,
-      S=作成日, T=ステータス, U=仕入れ先URL
-    """
-    today      = datetime.now().strftime("%Y-%m-%d")
-    judgment   = "✅ GO" if result["is_go"] else "❌ No-Go"
-    ebay_usd   = f"${result['ebay_usd']:.2f}" if result["ebay_usd"] else ""
-    profit     = result.get("profit") or {}
-    amazon_jpy = parse_jpy(result.get("amazon_price_str", ""))
-    refund_jpy = round(amazon_jpy * 0.1)
-
-    row_data = [
-        mpn,                                        # A: MPN
-        result.get("amazon_title", ""),             # B: 商品名
-        "",                                         # C: タイトル(eBay)
-        "",                                         # D: カテゴリ
-        "New",                                      # E: コンディション
-        ebay_usd,                                   # F: 販売価格(USD)
-        "Free Shipping",                            # G: 送料
-        "30 Days Returns",                          # H: 返品
-        "Amazon.co.jp",                             # I: 仕入れ先
-        result.get("amazon_price_str", ""),         # J: 仕入れ価格(JPY)
-        result.get("sold_count", ""),               # K: 月間Sold数
-        judgment,                                   # L: 判定
-        result.get("keepa_match", ""),              # M: Keepa照合
-        profit.get("weight_kg", ""),                # N: 請求重量(kg)
-        profit.get("shipping_jpy", ""),             # O: 送料(JPY)
-        profit.get("profit_jpy", ""),               # P: 利益(JPY)
-        refund_jpy if amazon_jpy else "",           # Q: 還付金額（仕入れの10%）
-        "",                                         # R: アイテムスペシフィクス
-        today,                                      # S: 作成日
-        "リサーチ完了",                               # T: ステータス
-        result.get("amazon_url", ""),               # U: 仕入れ先URL
-    ]
-
-    if dry_run:
-        print(f"  [DRY-RUN] 書き込み予定: MPN={mpn} | 判定={judgment} | "
-              f"利益=¥{profit.get('profit_jpy', 0):,}")
-        return
-
-    next_row = len(ws.get_all_values()) + 1
-    if next_row > ws.row_count:
-        ws.add_rows(100)
-    ws.update([row_data], f'A{next_row}', value_input_option='USER_ENTERED')
-    time.sleep(0.5)
-
-
 # ==========================================
 # Phase 2: 1件のMPNをリサーチ
 # ==========================================
-def research_one(mpn: str, rate: float, ws, dry_run: bool,
+def research_one(mpn: str, rate: float, ws,
                  account: str = "kozuki", force: bool = False,
-                 manual_sold: int = 0, driver=None, ebay_driver=None) -> dict:
+                 manual_sold: int = 0, driver=None, ebay_driver=None,
+                 dry_run: bool = False, known_jan: str = "") -> dict:
     print(f"\n{'─'*55}")
     print(f"  MPN: {mpn}")
     print(f"{'─'*55}")
@@ -792,117 +567,33 @@ def research_one(mpn: str, rate: float, ws, dry_run: bool,
         print(f"  → ⚠️  汎用/無効なMPN → スキップ")
         return {"status": "skipped", "reason": "汎用/無効なMPN"}
 
-    # ── Keepa: MPN→商品情報取得 ────────────────────────
-    keepa_key    = _get_keepa_api_key()
-    amazon_title = amazon_price_str = amazon_url = weight_kg = None
-    keepa_match  = ""
-    if keepa_key:
-        print("  [Keepa] MPN検索中...")
-        amazon_title, amazon_price_str, amazon_url, weight_kg, keepa_match = \
-            get_keepa_info_by_mpn(mpn, keepa_key)
-        if amazon_title:
-            print(f"          商品名: {amazon_title[:60]}")
-        if amazon_price_str:
-            print(f"          価格 : {amazon_price_str}")
-        if keepa_match:
-            print(f"          照合 : {keepa_match}")
-        if weight_kg:
-            print(f"          請求重量: {weight_kg:.3f} kg")
-        else:
-            print(f"          請求重量: 不明 → デフォルト {DEFAULT_WEIGHT_KG} kg を使用")
-    else:
-        print("  ⚠️  KEEPA_API_KEY未設定")
+    # ── JAN / ASIN 特定 ──────────────────────────────────
+    print("  [JAN] JANコード特定中...")
+    jan, asin = get_jan_for_mpn(mpn, known_jan)
+    if not jan:
+        print("  → ❌ JANコードが特定できませんでした（eBay/Keepaいずれからも未検出）。スキップ")
+        return {"status": "skipped", "reason": "JAN未特定"}
 
-    # ── Step 1: Terapeak 販売実績確認 ────────────────────
-    terapeak_avg_usd = 0.0
-    ebay_title       = ""
-    if force:
-        sold_count = manual_sold if manual_sold > 0 else SOLD_THRESHOLD
-        print(f"  [Step 1] ⏭  スキップ（--force 指定）販売数: {sold_count}個として処理")
-    else:
-        print("  [Step 1] Terapeak販売実績確認（過去30日・MPNキーワード検索）...")
-        sold_count, ebay_title, terapeak_avg_usd = get_terapeak_sold_count(mpn, driver)
-        print(f"           販売数: {sold_count}個")
-        if terapeak_avg_usd:
-            print(f"           Terapeak平均販売価格: ${terapeak_avg_usd:.2f}")
-
-        if sold_count < SOLD_THRESHOLD:
-            print(f"  → ❌ 販売実績不足（{sold_count}個 < {SOLD_THRESHOLD}個）スキップ")
-            return {"status": "skipped", "reason": "販売実績不足", "sold_count": sold_count}
-
-    print(f"  → ✅ 販売実績OK（{sold_count}個）")
-
-    # ── Step 2: 仕入れ価格確認 ───────────────────────────
-    print("  [Step 2] 仕入れ価格確認（Keepa）...")
-    if not amazon_price_str:
-        print("  → ❌ Keepa価格取得失敗。スキップ")
-        return {"status": "skipped", "reason": "Keepa価格取得失敗"}
-
-    amazon_jpy = parse_jpy(amazon_price_str)
-    print(f"           商品名: {(amazon_title or '(不明)')[:50]}")
-    print(f"           価格: {amazon_price_str}")
-
-    # ── Step 3: eBay Active Listings 最安値取得 ───────────
-    print("  [Step 3] eBay最安値（Active Listings・新品）取得...")
-    ebay_usd, ebay_url = get_ebay_active_lowest(
-        mpn, ebay_driver, title_kw=_ascii_keywords(amazon_title or ebay_title or ""))
-
-    price_source = "eBay Active"
-    if ebay_usd:
-        print(f"           最安値: ${ebay_usd:.2f}")
-        print(f"           URL: {ebay_url[:70] if ebay_url else '(なし)'}")
-    elif terapeak_avg_usd:
-        ebay_usd     = terapeak_avg_usd
-        ebay_url     = ""
-        price_source = "Terapeak販売履歴(平均)"
-        print(f"           → eBay出品なし。Terapeak平均価格で利益計算: ${ebay_usd:.2f}")
-    else:
-        print("           → eBay出品なし・Terapeak価格も取得不可")
-
-    # ── Step 4: 利益計算 ──────────────────────────────────
-    print(f"  [Step 4] 利益計算... (レート: ¥{rate:.1f}/USD, 価格ソース: {price_source})")
-    profit      = calc_profit(ebay_usd, amazon_jpy, rate, weight_kg)
-    used_weight = profit["weight_kg"]
-
-    print(f"           売上   : ¥{profit['revenue_jpy']:>8,}")
-    print(f"           仕入れ : ¥{amazon_jpy:>8,}  (−)")
-    print(f"           eBay手数料: ¥{profit['ebay_fee_jpy']:>6,}  (−)")
-    print(f"           関税   : ¥{profit['customs_jpy']:>8,}  (−)")
-    print(f"           送料   : ¥{profit['shipping_jpy']:>8,}  (−)  "
-          f"[{used_weight:.3f}kg: 基本¥{profit['base_shipping']:,} + "
-          f"通関¥{profit['us_clearance']} + 関税処理¥{profit['us_processing']}]")
-    print(f"           {'─'*30}")
-    judgment = "✅ GO" if profit["is_go"] else "❌ No-Go"
-    print(f"           利益   : ¥{profit['profit_jpy']:>8,}  → {judgment}")
-
-    SHIPPING_LIMIT_JPY = 5000
-    if profit["shipping_jpy"] >= SHIPPING_LIMIT_JPY:
-        print(f"  → ❌ 送料上限超過（¥{profit['shipping_jpy']:,} ≥ ¥{SHIPPING_LIMIT_JPY:,}）スキップ")
-        return {"status": "skipped", "reason": f"送料上限超過（¥{profit['shipping_jpy']:,}）"}
-
-    result = {
-        "status":           "processed",
-        "sold_count":       sold_count,
-        "amazon_title":     amazon_title or ebay_title or mpn,
-        "amazon_price_str": amazon_price_str,
-        "amazon_url":       amazon_url or "",
-        "keepa_match":      keepa_match,
-        "ebay_usd":         ebay_usd,
-        "ebay_url":         ebay_url,
-        "profit":           profit,
-        "is_go":            profit["is_go"],
-    }
-
-    write_to_sheet(ws, mpn, result, dry_run)
+    # ── jan_research.py にリサーチを委譲 ──────────────────
+    print(f"  [連携] JAN {jan} を jan_research.py のリサーチに委譲します...")
+    result = jan_research.research_one(
+        jan, rate, ws, dry_run,
+        account=account, force=force, manual_sold=manual_sold,
+        driver=driver, ebay_driver=ebay_driver,
+    )
+    result["mpn"] = mpn
+    result["jan"] = jan
+    if asin:
+        result["asin"] = asin
     return result
 
 
 # ==========================================
 # Phase 2: 全MPNをリサーチ（ドライバー管理含む）
 # ==========================================
-def run_research(mpn_codes: list[str], rate: float, ws, dry_run: bool,
+def run_research(mpn_pairs: list[tuple[str, str]], rate: float, ws, dry_run: bool,
                  account: str, force: bool, manual_sold: int) -> dict:
-    """MPNリストに対してリサーチを実行し、サマリー辞書を返す。"""
+    """(MPN, JAN)リストに対してリサーチを実行し、サマリー辞書を返す。"""
 
     # Terapeak ドライバー起動
     t_driver = None
@@ -931,11 +622,12 @@ def run_research(mpn_codes: list[str], rate: float, ws, dry_run: bool,
 
     summary = {"go": [], "no_go": [], "skipped": []}
     try:
-        for mpn in mpn_codes:
+        for mpn, known_jan in mpn_pairs:
             mpn = mpn.strip()
-            result = research_one(mpn, rate, ws, dry_run, account=account,
+            result = research_one(mpn, rate, ws, account=account,
                                   force=force, manual_sold=manual_sold,
-                                  driver=t_driver, ebay_driver=ebay_driver)
+                                  driver=t_driver, ebay_driver=ebay_driver,
+                                  dry_run=dry_run, known_jan=known_jan)
 
             if result["status"] == "skipped":
                 summary["skipped"].append(mpn)
@@ -1061,20 +753,10 @@ def main():
     rate = get_usd_jpy_rate()
     print(f"  ✅ USD/JPY: ¥{rate:.1f}")
 
-    print("[初期化] スプレッドシート接続中...")
-    creds  = ServiceAccountCredentials.from_json_keyfile_name(JSON_FILE, SCOPE)
+    print(f"[初期化] スプレッドシート接続中...（連携先: jan_research.py「{jan_research.TAB_NAME}」タブ）")
+    creds  = Credentials.from_service_account_file(jan_research.JSON_FILE, scopes=jan_research.SCOPE)
     client = gspread.authorize(creds)
-    sh     = client.open_by_key(SPREADSHEET_ID)
-    try:
-        ws = sh.worksheet(TAB_NAME)
-    except gspread.exceptions.WorksheetNotFound:
-        ws = sh.add_worksheet(title=TAB_NAME, rows=500, cols=21)
-        header = ["MPN", "商品名", "タイトル(eBay)", "カテゴリ", "コンディション",
-                  "販売価格(USD)", "送料", "返品", "仕入れ先", "仕入れ価格(JPY)",
-                  "月間Sold数", "判定", "Keepa照合", "請求重量(kg)", "送料(JPY)",
-                  "利益(JPY)", "還付金額(JPY)", "アイテムスペシフィクス",
-                  "作成日", "ステータス", "仕入れ先URL"]
-        ws.update([header], "A1")
+    ws     = client.open_by_key(jan_research.SPREADSHEET_ID).worksheet(jan_research.TAB_NAME)
     print("  ✅ 接続成功")
 
     total_summary = {"go": [], "no_go": [], "skipped": []}
@@ -1123,7 +805,8 @@ def main():
     # ③ MPN直接指定
     else:
         print(f"[直接指定] {len(mpn_codes)}件のMPN")
-        s = run_research(mpn_codes, rate, ws, dry_run, account, force, manual_sold)
+        mpn_pairs = [(mpn, "") for mpn in mpn_codes]
+        s = run_research(mpn_pairs, rate, ws, dry_run, account, force, manual_sold)
         _merge(s)
 
     # ── サマリー ──────────────────────────────────────────
@@ -1134,7 +817,7 @@ def main():
     print(f"  ❌ No-Go   : {len(total_summary['no_go'])}件  {total_summary['no_go']}")
     print(f"  ⏭  スキップ : {len(total_summary['skipped'])}件  {total_summary['skipped']}")
     if not dry_run and (total_summary["go"] or total_summary["no_go"]):
-        print(f"\n  スプレッドシート「{TAB_NAME}」タブに書き込みました。")
+        print(f"\n  スプレッドシート「{jan_research.TAB_NAME}」タブに書き込みました。")
     print(f"{'='*55}\n")
 
 
