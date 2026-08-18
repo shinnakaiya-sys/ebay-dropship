@@ -22,6 +22,7 @@ import requests
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from config import CONFIG
+from ebay_oauth import SCOPE_MARKETING, get_user_token
 from keepa_checker import KeepaChecker
 from sheets_manager import SheetsManager
 
@@ -131,9 +132,9 @@ LISTING_DURATION = "GTC"  # GTC = Good Till Cancelled（無期限）
 class EbayLister:
     def __init__(self, token: str, oauth_token: str = ""):
         self.token = token
-        # Marketing API用OAuth2トークン（sell.marketingスコープ必須）
-        # Trading APIのIAFトークンとは別物。未設定時はPromoted Listingをスキップ。
-        self.oauth_token = oauth_token or CONFIG.get("EBAY_OAUTH_TOKEN", "")
+        # Marketing API用OAuth2トークン（sell.marketingスコープ必須、Trading APIのIAFトークンとは別物）
+        # 明示指定が無ければEBAY_REFRESH_TOKENから都度取得する（_oauth_token参照）。
+        self.oauth_token = oauth_token
         self.headers = {
             "X-EBAY-API-SITEID":              "0",    # 0=US
             "X-EBAY-API-COMPATIBILITY-LEVEL": "967",
@@ -145,22 +146,28 @@ class EbayLister:
     # ──────────────────────────────────────────────────────
     # Promoted Listings (General) - Default campaign
     # ──────────────────────────────────────────────────────
+    def _oauth_token(self) -> str:
+        """Marketing API用トークンを取得する（明示指定が無ければrefresh_tokenから都度取得・自動更新）"""
+        if self.oauth_token:
+            return self.oauth_token
+        return get_user_token(CONFIG, SCOPE_MARKETING)
+
     def _get_default_campaign_id(self) -> str:
         """Default campaignのIDを取得してキャッシュ"""
         if self._campaign_id:
             return self._campaign_id
-        if not self.oauth_token:
+        token = self._oauth_token()
+        if not token:
             print(
-                "  ℹ️  Promoted Listing: EBAY_OAUTH_TOKEN未設定のためスキップ\n"
-                "     → eBay Developer Portal で sell.marketing スコープ付きトークンを発行し\n"
-                "       .env に EBAY_OAUTH_TOKEN=<token> を追加してください"
+                "  ℹ️  Promoted Listing: Marketing APIトークン取得失敗のためスキップ\n"
+                "     → ebay_oauth_authorize.py で sell.marketing スコープを含めて再認可してください"
             )
             return ""
         try:
             resp = requests.get(
                 "https://api.ebay.com/sell/marketing/v1/ad_campaign",
                 headers={
-                    "Authorization": f"Bearer {self.oauth_token}",
+                    "Authorization": f"Bearer {token}",
                     "Content-Type":  "application/json",
                 },
                 timeout=15,
@@ -181,8 +188,8 @@ class EbayLister:
                 print(f"  ⚠️  RUNNINGキャンペーンが見つかりません（eBay Seller Hub で確認してください）")
             elif resp.status_code == 403:
                 print(
-                    "  ⚠️  Marketing API 403: EBAY_OAUTH_TOKEN に sell.marketing スコープが不足しています\n"
-                    "     → eBay Developer Portal でトークンを再発行してください"
+                    "  ⚠️  Marketing API 403: トークンに sell.marketing スコープが不足しています\n"
+                    "     → ebay_oauth_authorize.py で再認可してください"
                 )
             else:
                 print(f"  ⚠️  キャンペーン一覧取得失敗: {resp.status_code}")
@@ -195,11 +202,14 @@ class EbayLister:
         campaign_id = self._get_default_campaign_id()
         if not campaign_id:
             return False
+        token = self._oauth_token()
+        if not token:
+            return False
         try:
             resp = requests.post(
                 f"https://api.ebay.com/sell/marketing/v1/ad_campaign/{campaign_id}/bulk_create_ads_by_listing_id",
                 headers={
-                    "Authorization": f"Bearer {self.oauth_token}",
+                    "Authorization": f"Bearer {token}",
                     "Content-Type":  "application/json",
                 },
                 json={

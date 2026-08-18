@@ -32,6 +32,8 @@ CONFIG = {
     "EBAY_OAUTH_TOKEN":   os.getenv("EBAY_OAUTH_TOKEN"),   # Marketing API用（sell.marketing スコープ必須）
     "EBAY_APP_ID":        os.getenv("EBAY_APP_ID"),        # Browse API用 Client ID
     "EBAY_CLIENT_SECRET": os.getenv("EBAY_CLIENT_SECRET"), # Browse API用 Cert ID
+    "EBAY_REFRESH_TOKEN": os.getenv("EBAY_REFRESH_TOKEN"), # ユーザートークン更新用（sell.analytics.readonly等）
+    "EBAY_RUNAME":        os.getenv("EBAY_RUNAME"),        # OAuth認可コードフロー用のRuName
     "EBAY_SELLER_ID":     os.getenv("EBAY_SELLER_ID", "kaworu2021"),  # 自分のセラーID
     "ANTHROPIC_API_KEY":  os.getenv("ANTHROPIC_API_KEY"),
     "SLACK_WEBHOOK":      os.getenv("SLACK_WEBHOOK"),    # 任意
