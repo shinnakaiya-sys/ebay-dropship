@@ -33,7 +33,7 @@ jan_research.py の本体リサーチ（Terapeak・Keepa・eBay最安値・利�
   --account kozuki/kaworu/dbz  アカウント指定（省略時: kozuki）
   --seller <id_or_url>         セラーIDまたはURL（MPNを自動収集）
   --seller-list <file>         セラーリストファイル（seller_id,account 形式）
-  --max N                      セラー1人あたりのSOLD収集上限（デフォルト: 50）
+  --max N                      セラー1人あたりのSOLD収集上限（デフォルト: 300）
   --dry-run                    スプレッドシート書き込みをスキップ
   --force                      Step 1（Terapeak）をスキップ
   --sold-count N               --force 時の手動販売数指定
@@ -591,11 +591,11 @@ def research_one(mpn: str, rate: float, ws,
 # ==========================================
 # Phase 2: 全MPNをリサーチ（ドライバー管理含む）
 # ==========================================
-def run_research(mpn_pairs: list[tuple[str, str]], rate: float, ws, dry_run: bool,
-                 account: str, force: bool, manual_sold: int) -> dict:
-    """(MPN, JAN)リストに対してリサーチを実行し、サマリー辞書を返す。"""
+BATCH_SIZE = 30  # この件数ごとにTerapeak/eBayドライバーを再起動する
 
-    # Terapeak ドライバー起動
+
+def _start_drivers(force: bool) -> tuple:
+    """Terapeak/eBay検索ドライバーを起動する。戻り値: (t_driver, ebay_driver, force)"""
     t_driver = None
     if not force and not TERAPEAK_AVAILABLE:
         print("[Phase 2] Terapeak未インストール → --force モードで続行")
@@ -610,7 +610,6 @@ def run_research(mpn_pairs: list[tuple[str, str]], rate: float, ws, dry_run: boo
             print(f"  ⚠️  Teapeakドライバー起動失敗: {e}")
             raise
 
-    # eBay検索ドライバー起動
     ebay_driver = None
     print("[Phase 2] eBay検索ドライバー起動中...")
     try:
@@ -620,33 +619,60 @@ def run_research(mpn_pairs: list[tuple[str, str]], rate: float, ws, dry_run: boo
         print(f"  ⚠️  eBay検索ドライバー起動失敗: {e}")
         print("     Step 3をスキップします")
 
-    summary = {"go": [], "no_go": [], "skipped": []}
-    try:
-        for mpn, known_jan in mpn_pairs:
-            mpn = mpn.strip()
-            result = research_one(mpn, rate, ws, account=account,
-                                  force=force, manual_sold=manual_sold,
-                                  driver=t_driver, ebay_driver=ebay_driver,
-                                  dry_run=dry_run, known_jan=known_jan)
+    return t_driver, ebay_driver, force
 
-            if result["status"] == "skipped":
-                summary["skipped"].append(mpn)
-            elif result.get("is_go"):
-                summary["go"].append(mpn)
-            else:
-                summary["no_go"].append(mpn)
 
-            time.sleep(1)
-    finally:
-        if t_driver:
-            t_driver.quit()
-            print("\n  Teapeakドライバーを終了しました。")
-        if ebay_driver:
-            try:
-                ebay_driver.quit()
-            except Exception:
-                pass
-            print("  eBay検索ドライバーを終了しました。")
+def _stop_drivers(t_driver, ebay_driver) -> None:
+    """Terapeak/eBay検索ドライバーを終了する。"""
+    if t_driver:
+        t_driver.quit()
+        print("\n  Teapeakドライバーを終了しました。")
+    if ebay_driver:
+        try:
+            ebay_driver.quit()
+        except Exception:
+            pass
+        print("  eBay検索ドライバーを終了しました。")
+
+
+def run_research(mpn_pairs: list[tuple[str, str]], rate: float, ws, dry_run: bool,
+                 account: str, force: bool, manual_sold: int) -> dict:
+    """
+    (MPN, JAN)リストに対してリサーチを実行し、サマリー辞書を返す。
+    BATCH_SIZE件ごとにTerapeak/eBayドライバーを再起動する。
+    """
+    summary     = {"go": [], "no_go": [], "skipped": []}
+    total       = len(mpn_pairs)
+    batch_total = (total + BATCH_SIZE - 1) // BATCH_SIZE
+
+    for batch_start in range(0, total, BATCH_SIZE):
+        batch    = mpn_pairs[batch_start:batch_start + BATCH_SIZE]
+        batch_no = batch_start // BATCH_SIZE + 1
+
+        print(f"\n{'='*55}")
+        print(f"  バッチ {batch_no}/{batch_total}"
+              f"（{batch_start + 1}〜{batch_start + len(batch)}/{total}件）")
+        print(f"{'='*55}")
+
+        t_driver, ebay_driver, force = _start_drivers(force)
+        try:
+            for mpn, known_jan in batch:
+                mpn = mpn.strip()
+                result = research_one(mpn, rate, ws, account=account,
+                                      force=force, manual_sold=manual_sold,
+                                      driver=t_driver, ebay_driver=ebay_driver,
+                                      dry_run=dry_run, known_jan=known_jan)
+
+                if result["status"] == "skipped":
+                    summary["skipped"].append(mpn)
+                elif result.get("is_go"):
+                    summary["go"].append(mpn)
+                else:
+                    summary["no_go"].append(mpn)
+
+                time.sleep(1)
+        finally:
+            _stop_drivers(t_driver, ebay_driver)
 
     return summary
 
@@ -685,7 +711,7 @@ def main():
             break
 
     # --max 解析
-    max_items = 50
+    max_items = 300
     for i, arg in enumerate(args):
         if arg == "--max" and i + 1 < len(args):
             try: max_items = int(args[i + 1])
