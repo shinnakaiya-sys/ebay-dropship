@@ -127,7 +127,7 @@ def main():
 
             amazon_price    = keepa_data["current_price"]
             amazon_in_stock = keepa_data["in_stock"]
-            price_changed   = abs(amazon_price - base_price) / base_price >= 0.05
+            price_changed   = abs(amazon_price - base_price) / base_price >= product_config["PRICE_CHANGE_THRESHOLD"]
 
             # Sheetsに記録
             sheets.log_price(asin, "amazon", amazon_price, amazon_in_stock)
