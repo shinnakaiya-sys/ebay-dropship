@@ -91,6 +91,8 @@ def main():
 
     products = sheets.get_active_products()
     targets  = [p for p in products if p.get("ASIN") or p.get("JANコード")]
+    # 最終チェック日が古い順に並べ替え（前回スキップされた商品を優先）
+    targets.sort(key=lambda p: p.get("最終チェック日", "") or "")
 
     if args.limit > 0:
         targets = targets[:args.limit]
