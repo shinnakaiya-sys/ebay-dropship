@@ -1,9 +1,16 @@
 """
-eBay SpeedPAK Economy Japan 送料計算モジュール
-Orange Connex 発効日: 2026年7月30日
+eBay SpeedPAK Economy / FedEx (International Connect Plus) Japan 送料計算モジュール
 
-送料 = 基本料金 + サーチャージ
-請求重量 = max(実重量, 容積重量)  ※容積重量 = 長さ×幅×高さ(cm) ÷ 8,000
+  SpeedPAK Economy: Orange Connex 発効日 2026年7月30日
+    送料 = 基本料金 + サーチャージ
+    請求重量 = max(実重量, 容積重量)  ※容積重量 = 長さ×幅×高さ(cm) ÷ 8,000
+
+  FedEx International Connect Plus: Orange Connex 発効日 2026年4月5日
+    「eBay SpeedPAK Japan – Ship via FedEx サービス&料金表 2026」より
+    送料 = 基本料金のみ（個人宅配達料・米国輸入手続き手数料はFICPで無料）
+    請求重量 = max(実重量, 容積重量)  ※容積重量 = 長さ×幅×高さ(cm) ÷ 5,000（SpeedPAKと異なる）
+
+get_shipping_jpy() は両者を計算し、安い方の送料（JPY）を返す。
 """
 
 import math
@@ -111,6 +118,124 @@ RATE_TABLES = {
 }
 
 
+# ─────────────────────────────────────────────────────────
+# FedEx (International Connect Plus) 基本料金表（JPY）
+# 「eBay SpeedPAK Japan – Ship via FedEx サービス&料金表 2026」より抽出
+# キー: 重量上限(kg)  値: 基本料金(JPY)
+#
+# ゾーン対応（料金表の地域区分ページより）:
+#   USW    = アメリカ合衆国（西部）ID/UT/AZ/NV/CA/OR/WA + アメリカ合衆国（その他＝AK/HI等）
+#   USE_CA = アメリカ合衆国（西部記載州以外の全州＝実質東部・中部・南部）+ カナダ + PR/USVI
+#   DE_GB  = ドイツ・イギリス
+#   AU_NZ  = オーストラリア・ニュージーランド
+# ─────────────────────────────────────────────────────────
+
+_FEDEX_FICP_USW = {
+    0.5: 2082, 1: 2558, 1.5: 2797, 2: 3061, 2.5: 3328,
+    3: 3492, 3.5: 3549, 4: 3973, 4.5: 4395, 5: 4718,
+    5.5: 5043, 6: 5366, 6.5: 5734, 7: 6183, 7.5: 6575,
+    8: 6761, 8.5: 6947, 9: 7131, 9.5: 8735, 10: 8958,
+    10.5: 9195, 11: 9432, 11.5: 9672, 12: 9910, 12.5: 11323,
+    13: 11589, 13.5: 11854, 14: 12120, 14.5: 12385, 15: 12650,
+    15.5: 12915, 16: 14544, 16.5: 14837, 17: 15129, 17.5: 15422,
+    18: 15715, 18.5: 16007, 19: 16300, 19.5: 16594, 20: 16887,
+    21: 19070, 22: 20035, 23: 21000, 24: 21966, 25: 22929,
+    26: 23895, 27: 24860, 28: 25825, 29: 26790, 30: 27754,
+    31: 28720, 32: 29684, 33: 31582, 34: 32539, 35: 33496,
+    36: 34453, 37: 35410, 38: 36367, 39: 37324, 40: 38281,
+    41: 39239, 42: 40196, 43: 41153, 44: 42110, 45: 42110,
+    46: 42110, 47: 42110, 48: 42110, 49: 42364, 50: 43229,
+    51: 44094, 52: 44958, 53: 45823, 54: 46687, 55: 47552,
+    56: 48416, 57: 49281, 58: 50146, 59: 51010, 60: 51875,
+    61: 52739, 62: 53604, 63: 54469, 64: 55333, 65: 56198,
+    66: 57062, 67: 57927, 68: 58791,
+}
+
+_FEDEX_FICP_USE_CA = {
+    0.5: 2115, 1: 2599, 1.5: 2840, 2: 3108, 2.5: 3383,
+    3: 3540, 3.5: 3593, 4: 4022, 4.5: 4451, 5: 4718,
+    5.5: 5043, 6: 5366, 6.5: 5735, 7: 6184, 7.5: 6683,
+    8: 6871, 8.5: 7060, 9: 7249, 9.5: 8865, 10: 9089,
+    10.5: 9346, 11: 9602, 11.5: 9861, 12: 10116, 12.5: 11439,
+    13: 11723, 13.5: 12006, 14: 12289, 14.5: 12573, 15: 12857,
+    15.5: 13140, 16: 14631, 16.5: 14940, 17: 15249, 17.5: 15559,
+    18: 15867, 18.5: 16177, 19: 16485, 19.5: 16794, 20: 17104,
+    21: 20625, 22: 21657, 23: 22689, 24: 23721, 25: 24754,
+    26: 25787, 27: 26819, 28: 27852, 29: 28885, 30: 29916,
+    31: 30950, 32: 31983, 33: 34201, 34: 35237, 35: 36274,
+    36: 37310, 37: 38346, 38: 39383, 39: 40419, 40: 41455,
+    41: 42492, 42: 43528, 43: 44565, 44: 45601, 45: 45624,
+    46: 45624, 47: 45624, 48: 45792, 49: 46746, 50: 47700,
+    51: 48654, 52: 49608, 53: 50562, 54: 51516, 55: 52470,
+    56: 53424, 57: 54378, 58: 55332, 59: 56286, 60: 57240,
+    61: 58194, 62: 59148, 63: 60102, 64: 61056, 65: 62010,
+    66: 62964, 67: 63918, 68: 64872,
+}
+
+_FEDEX_FICP_DE_GB = {
+    0.5: 2071, 1: 2417, 1.5: 2814, 2: 3161, 2.5: 3512,
+    3: 3535, 3.5: 3594, 4: 3904, 4.5: 4218, 5: 4530,
+    5.5: 5273, 6: 5491, 6.5: 5708, 7: 5925, 7.5: 6142,
+    8: 6360, 8.5: 6577, 9: 6794, 9.5: 8251, 10: 8507,
+    10.5: 8680, 11: 8855, 11.5: 9031, 12: 9206, 12.5: 10814,
+    13: 11017, 13.5: 11218, 14: 11420, 14.5: 11622, 15: 11823,
+    15.5: 12025, 16: 13878, 16.5: 14106, 17: 14334, 17.5: 14563,
+    18: 14792, 18.5: 15020, 19: 15252, 19.5: 15477, 20: 15707,
+    21: 21274, 22: 22354, 23: 23435, 24: 24515, 25: 25596,
+    26: 26677, 27: 27757, 28: 28838, 29: 29920, 30: 31001,
+    31: 32081, 32: 33162, 33: 36169, 34: 37266, 35: 38361,
+    36: 39457, 37: 40554, 38: 41649, 39: 42745, 40: 43842,
+    41: 44938, 42: 46033, 43: 47130, 44: 48226, 45: 48226,
+    46: 48226, 47: 48226, 48: 48226, 49: 48226, 50: 48559,
+    51: 49530, 52: 50502, 53: 51473, 54: 52444, 55: 53415,
+    56: 54386, 57: 55358, 58: 56328, 59: 57300, 60: 58271,
+    61: 59243, 62: 60213, 63: 61184, 64: 62156, 65: 63127,
+    66: 64098, 67: 65069, 68: 66041,
+}
+
+_FEDEX_FICP_AU_NZ = {
+    0.5: 2737, 1: 3014, 1.5: 3024, 2: 3339, 2.5: 3656,
+    3: 3950, 3.5: 4242, 4: 4535, 4.5: 4828, 5: 5124,
+    5.5: 5337, 6: 5637, 6.5: 5937, 7: 6235, 7.5: 6536,
+    8: 6836, 8.5: 7135, 9: 7435, 9.5: 8438, 10: 8764,
+    10.5: 9028, 11: 9292, 11.5: 9555, 12: 9819, 12.5: 21180,
+    13: 21733, 13.5: 22287, 14: 22840, 14.5: 23394, 15: 23948,
+    15.5: 24500, 16: 25053, 16.5: 25607, 17: 26160, 17.5: 26715,
+    18: 27267, 18.5: 27820, 19: 28375, 19.5: 28928, 20: 29484,
+    21: 31945, 22: 33577, 23: 35208, 24: 36837, 25: 38470,
+    26: 40101, 27: 41732, 28: 43363, 29: 44994, 30: 46626,
+    31: 48256, 32: 49888, 33: 49944, 34: 50185, 35: 51661,
+    36: 53137, 37: 54613, 38: 56089, 39: 57565, 40: 59041,
+    41: 60517, 42: 61993, 43: 63469, 44: 64945, 45: 64945,
+    46: 64945, 47: 64945, 48: 64945, 49: 64945, 50: 64945,
+    51: 66208, 52: 67507, 53: 68805, 54: 70103, 55: 71401,
+    56: 72699, 57: 73998, 58: 75296, 59: 76594, 60: 77892,
+    61: 79190, 62: 80489, 63: 81787, 64: 83085, 65: 84383,
+    66: 85681, 67: 86980, 68: 88278,
+}
+
+FEDEX_RATE_TABLES = {
+    "USW":    _FEDEX_FICP_USW,
+    "USE_CA": _FEDEX_FICP_USE_CA,
+    "DE_GB":  _FEDEX_FICP_DE_GB,
+    "AU_NZ":  _FEDEX_FICP_AU_NZ,
+}
+
+# get_shipping_jpy() の destination（既存の運用区分）→ FedExゾーンの対応表
+#   US48: 具体的な州が不明なため、48州の大半を占めるゾーン（USE_CA）を採用
+#         （USWは料金表上、西海岸寄りの7州＋AK/HI等に限られる）
+#   US_OTHER: アラスカ・ハワイ等は料金表の地域区分でUSW（西部）に含まれる
+FEDEX_ZONE_MAP = {
+    "US48":     "USE_CA",
+    "US_OTHER": "USW",
+    "UK":       "DE_GB",
+    "DE":       "DE_GB",
+    "AU":       "AU_NZ",
+}
+
+_FEDEX_VOLUMETRIC_DIVISOR = 5000  # FedEx: 長さ×幅×高さ(cm) ÷ 5,000（SpeedPAKは8,000）
+
+
 def _lookup(table: dict, billed_weight_kg: float) -> int:
     """料金表から請求重量に対応する基本料金を返す（切り上げ検索）"""
     for limit, fee in sorted(table.items()):
@@ -137,24 +262,31 @@ def calc_billed_weight(
     return math.ceil(billed * 1000) / 1000
 
 
-def get_shipping_jpy(
+def calc_billed_weight_fedex(
+    actual_weight_kg: float,
+    length_cm: float = 0,
+    width_cm: float = 0,
+    height_cm: float = 0,
+) -> float:
+    """
+    FedEx請求重量 = max(実重量, 容積重量)
+    容積重量 = 長さ × 幅 × 高さ (cm) ÷ 5,000（SpeedPAKの8,000と異なる）
+    グラム端数は切り上げ（0.001kg単位）
+    """
+    vol_weight = ((length_cm * width_cm * height_cm) / _FEDEX_VOLUMETRIC_DIVISOR
+                  if (length_cm and width_cm and height_cm) else 0)
+    billed = max(actual_weight_kg, vol_weight)
+    return math.ceil(billed * 1000) / 1000
+
+
+def _get_speedpak_jpy(
     weight_kg: float,
     destination: str = "US48",
     length_cm: float = 0,
     width_cm: float = 0,
     height_cm: float = 0,
 ) -> int:
-    """
-    SpeedPAK送料（JPY）を計算して返す
-
-    Args:
-        weight_kg:   実重量(kg)
-        destination: "US48" / "US_OTHER" / "UK" / "DE" / "AU"
-        length_cm / width_cm / height_cm: 寸法（容積重量計算用、省略可）
-
-    Returns:
-        送料合計（JPY）
-    """
+    """SpeedPAK Economy送料（JPY）を計算して返す"""
     table = RATE_TABLES.get(destination, _US48)
     billed = calc_billed_weight(weight_kg, length_cm, width_cm, height_cm)
     base   = _lookup(table, billed)
@@ -171,3 +303,59 @@ def get_shipping_jpy(
                 surcharge += US_OVERSIZE_FEE
 
     return base + surcharge
+
+
+def get_fedex_shipping_jpy(
+    weight_kg: float,
+    destination: str = "US48",
+    length_cm: float = 0,
+    width_cm: float = 0,
+    height_cm: float = 0,
+) -> int:
+    """
+    FedEx International Connect Plus送料（JPY）を計算して返す
+
+    個人宅配達料・米国輸入手続き手数料はFICPで無料のため加算しない。
+    燃料割増金・混雑時割増金は料金ガイドに固定額の記載がないため計算に含めない
+    （SpeedPAK側も同様に変動サーチャージは含めていない）。
+    """
+    zone  = FEDEX_ZONE_MAP.get(destination, "USE_CA")
+    table = FEDEX_RATE_TABLES[zone]
+    billed = calc_billed_weight_fedex(weight_kg, length_cm, width_cm, height_cm)
+    return _lookup(table, billed)
+
+
+def get_shipping_jpy(
+    weight_kg: float,
+    destination: str = "US48",
+    length_cm: float = 0,
+    width_cm: float = 0,
+    height_cm: float = 0,
+    return_detail: bool = False,
+):
+    """
+    SpeedPAK EconomyとFedEx International Connect Plusの送料を両方計算し、
+    安い方の送料（JPY）を返す。
+
+    Args:
+        weight_kg:   実重量(kg)
+        destination: "US48" / "US_OTHER" / "UK" / "DE" / "AU"
+        length_cm / width_cm / height_cm: 寸法（容積重量計算用、省略可）
+        return_detail: Trueの場合、内訳を含むdictを返す（デバッグ・検証用）
+
+    Returns:
+        送料合計（JPY）。return_detail=Trueの場合は
+        {"jpy": int, "carrier": "SpeedPAK"|"FedEx", "speedpak_jpy": int, "fedex_jpy": int}
+    """
+    speedpak_jpy = _get_speedpak_jpy(weight_kg, destination, length_cm, width_cm, height_cm)
+    fedex_jpy    = get_fedex_shipping_jpy(weight_kg, destination, length_cm, width_cm, height_cm)
+
+    if fedex_jpy < speedpak_jpy:
+        cheapest, carrier = fedex_jpy, "FedEx"
+    else:
+        cheapest, carrier = speedpak_jpy, "SpeedPAK"
+
+    if return_detail:
+        return {"jpy": cheapest, "carrier": carrier,
+                "speedpak_jpy": speedpak_jpy, "fedex_jpy": fedex_jpy}
+    return cheapest

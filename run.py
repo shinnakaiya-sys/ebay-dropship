@@ -229,18 +229,24 @@ def main():
 # ──────────────────────────────────────────────────────────
 # 売値計算（eBayドル建て）
 # ──────────────────────────────────────────────────────────
-def calc_sell_price(amazon_price_jpy, config, weight_kg: float = 1.0, min_price: float = None):
+def calc_sell_price(amazon_price_jpy, config, weight_kg: float = 1.0, min_price: float = None,
+                    length_cm: float = 0, width_cm: float = 0, height_cm: float = 0):
     """
-    Amazon円価格 → eBayドル売値を計算（SpeedPAK実送料を使用）
+    Amazon円価格 → eBayドル売値を計算（SpeedPAK/FedExの安い方の送料を使用）
 
     考慮する要素:
       - 為替レート
       - eBay手数料
-      - 国際送料（SpeedPAK Economy, US48）
+      - 国際送料（SpeedPAK EconomyとFedEx International Connect Plusの安い方、US48）
       - 目標利益率
+
+    length_cm/width_cm/height_cm を渡すと、キャリアごとに異なる容積重量の
+    割り算値（SpeedPAK ÷8,000 / FedEx ÷5,000）を踏まえた送料になる。省略時は
+    weight_kg（実重量、または容積重量まで含めた既知の請求重量）のみで計算する。
     """
     from shipping_calculator import get_shipping_jpy
-    shipping_jpy = get_shipping_jpy(weight_kg, destination="US48")
+    shipping_jpy = get_shipping_jpy(weight_kg, destination="US48",
+                                    length_cm=length_cm, width_cm=width_cm, height_cm=height_cm)
     product_usd  = amazon_price_jpy / config["JPY_TO_USD"] * (1 + config["TARIFF_RATE"])
     shipping_usd = shipping_jpy / config["JPY_TO_USD"]
     usd = (product_usd + shipping_usd) / (1 - config["EBAY_FEE_RATE"])

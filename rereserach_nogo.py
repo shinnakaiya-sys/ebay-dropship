@@ -184,10 +184,10 @@ def main():
             print(f"  行 {row_num} / JAN: {jan}")
             print(f"{'─'*55}")
 
-            # Keepa で最新の仕入れ価格・重量を取得
-            amazon_title, amazon_price_str, amazon_url, weight_kg = (
+            # Keepa で最新の仕入れ価格・実重量・寸法を取得
+            amazon_title, amazon_price_str, amazon_url, weight_kg, length_cm, width_cm, height_cm = (
                 get_keepa_info(jan, keepa_key) if keepa_key
-                else (None, None, None, None)
+                else (None, None, None, None, 0, 0, 0)
             )
 
             # Keepa 失敗時はシートの既存値を使用
@@ -227,7 +227,8 @@ def main():
                 print("  → eBay 出品なし（価格 $0 で計算）")
 
             # 利益計算
-            profit = calc_profit(ebay_usd, amazon_jpy, rate, weight_kg)
+            profit = calc_profit(ebay_usd, amazon_jpy, rate, weight_kg,
+                                 length_cm=length_cm, width_cm=width_cm, height_cm=height_cm)
             judgment = "✅ GO" if profit["is_go"] else "❌ No-Go"
             print(f"  売上: ¥{profit['revenue_jpy']:,} / 送料: ¥{profit['shipping_jpy']:,} "
                   f"/ 利益: ¥{profit['profit_jpy']:,} → {judgment}")

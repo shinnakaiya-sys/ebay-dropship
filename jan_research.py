@@ -14,7 +14,8 @@ Step 4: 利益計算 → GO/No-Go判定
               - 仕入れ価格(JPY)
               - eBay手数料(販売額の15%)
               - 関税(仕入れ価格の15%)
-              - 国際送料(デフォルト: 3,000円)
+              - 国際送料(SpeedPAK EconomyとFedExの安い方。shipping_calculator.get_shipping_jpy)
+              - 米国関税処理手数料(関税額の2.1%)
 
 使い方:
   python3 jan_research.py --account kozuki 4901777321991
@@ -41,6 +42,7 @@ try:
     TERAPEAK_AVAILABLE = True
 except ImportError:
     TERAPEAK_AVAILABLE = False
+from shipping_calculator import get_shipping_jpy
 
 # ==========================================
 # 設定
@@ -58,40 +60,8 @@ EBAY_FEE_RATE  = 0.15   # eBay手数料 17%
 CUSTOMS_RATE   = 0.15   # 関税（仕入れ価格の15%）
 MIN_PROFIT_JPY = 10    # GOと判定する最低利益ライン（円）
 
-# ==========================================
-# SpeedPAK Economy Japan 送料表（USA本土48州）
-# 出典: Orange Connex RATE GUIDE of eBay SpeedPAK Economy-JP（2026年7月30日改定）
-# ==========================================
-_SPEEDPAK_US48 = [
-    (0.1, 1157), (0.2, 1289), (0.3, 1491), (0.4, 1677), (0.5, 1943),
-    (0.6, 2096), (0.7, 2189), (0.8, 2549), (0.9, 2660), (1.0, 2848),
-    (1.1, 2958), (1.2, 3065), (1.3, 3174), (1.4, 3493), (1.5, 3599),
-    (1.6, 3711), (1.7, 3816), (1.8, 3928), (1.9, 4768), (2.0, 4947),
-    (2.5, 5264), (3.0, 5973), (3.5, 6562), (4.0, 7266), (4.5, 8615),
-    (5.0, 11065), (5.5, 11789), (6.0, 12576), (6.5, 13354), (7.0, 14344),
-    (7.5, 15144), (8.0, 15932), (8.5, 16563), (9.0, 17119), (9.5, 18019),
-    (10.0, 18522), (10.5, 19122), (11.0, 19677), (11.5, 20338), (12.0, 20936),
-    (12.5, 21585), (13.0, 22131), (13.5, 22685), (14.0, 23454), (14.5, 23766),
-    (15.0, 24509), (15.5, 25139), (16.0, 26547), (16.5, 27138), (17.0, 27817),
-    (17.5, 28478), (18.0, 29144), (18.5, 29687), (19.0, 30372), (19.5, 31062),
-    (20.0, 32016), (20.5, 32683), (21.0, 33410), (21.5, 34089), (22.0, 34762),
-    (22.5, 35463), (23.0, 36325), (23.5, 36860), (24.0, 37421), (24.5, 38077),
-    (25.0, 38625),
-]
-
-US_CUSTOMS_CLEARANCE_FEE   = 245    # 米国輸入通関手数料（円/件）
 US_CUSTOMS_PROCESSING_RATE = 0.021  # 米国関税処理手数料（関税額の2.1%）
 DEFAULT_WEIGHT_KG          = 0.5    # 重量不明時のデフォルト（kg）
-
-
-def get_speedpak_rate_us48(weight_kg: float) -> int:
-    """請求重量(kg)からSpeedPAK Economy USA本土48州の基本送料(JPY)を返す。"""
-    import math
-    weight_kg = math.ceil(weight_kg * 1000) / 1000  # グラム単位で切り上げ
-    for limit, price in _SPEEDPAK_US48:
-        if weight_kg <= limit:
-            return price
-    return _SPEEDPAK_US48[-1][1]  # 25kg超は最大料金
 
 AMAZON_HEADERS = {
     "User-Agent": (
@@ -267,13 +237,19 @@ def parse_jpy(price_str: str) -> int:
 # ==========================================
 # Step 2: Keepa で仕入れ情報取得
 # ==========================================
-def get_keepa_info(jan: str, api_key: str) -> tuple[str | None, str | None, str | None, float | None]:
+def get_keepa_info(jan: str, api_key: str) -> tuple[str | None, str | None, str | None,
+                                                     float | None, float, float, float]:
     """
     Keepa API でJANコードから商品情報を取得。
-    戻り値: (商品名, 価格文字列, Amazon URL, 請求重量kg)
+    戻り値: (商品名, 価格文字列, Amazon URL, 実重量kg, 長さcm, 幅cm, 高さcm)
+
+    請求重量（容積重量との比較）はキャリアごとに容積重量の割り算値が異なる
+    （SpeedPAK ÷8,000 / FedEx ÷5,000）ため、ここでは実重量と寸法のみを返し、
+    容積重量との比較は shipping_calculator.get_shipping_jpy() 側に委ねる。
+
     domain=5 = Amazon Japan
     価格はKeepaが×100で格納しているため÷100してYen換算。
-    重量はKeepaが100g単位で格納 → ÷10 でkg換算。
+    重量はKeepaがg単位で格納 → ÷1000 でkg換算。
     寸法はKeepaがmm単位で格納 → ÷10 でcm換算。
     """
     import math
@@ -292,7 +268,7 @@ def get_keepa_info(jan: str, api_key: str) -> tuple[str | None, str | None, str 
         resp.raise_for_status()
         products = resp.json().get("products", [])
         if not products:
-            return None, None, None, None
+            return None, None, None, None, 0, 0, 0
 
         product = products[0]
         title   = product.get("title") or None
@@ -311,41 +287,26 @@ def get_keepa_info(jan: str, api_key: str) -> tuple[str | None, str | None, str 
         if price_raw > 0:
             price_str = f"¥{price_raw:,}"
 
-        # 重量・寸法から請求重量を計算
-        # Keepa: packageWeight は100g単位, 寸法はmm単位
-        weight_kg = None
-        pkg_weight = product.get("packageWeight")   # 100g単位
+        # 実重量・寸法（容積重量の計算はキャリアごとに割り算値が異なるため
+        # ここでは行わず、shipping_calculator.get_shipping_jpy()に委ねる）
+        pkg_weight = product.get("packageWeight")   # g
         pkg_length = product.get("packageLength")   # mm
         pkg_width  = product.get("packageWidth")    # mm
         pkg_height = product.get("packageHeight")   # mm
 
-        actual_kg = None
+        weight_kg = None
         if pkg_weight and pkg_weight > 0:
-            actual_kg = pkg_weight / 1000.0  # g → kg
+            weight_kg = math.ceil(pkg_weight / 1000.0 * 1000) / 1000  # g → kg、グラム単位で切り上げ
 
-        vol_kg = None
-        if pkg_length and pkg_width and pkg_height and pkg_length > 0:
-            l_cm = pkg_length / 10
-            w_cm = pkg_width  / 10
-            h_cm = pkg_height / 10
-            vol_kg = (l_cm * w_cm * h_cm) / 8000
+        length_cm = pkg_length / 10 if pkg_length and pkg_length > 0 else 0
+        width_cm  = pkg_width  / 10 if pkg_width  and pkg_width  > 0 else 0
+        height_cm = pkg_height / 10 if pkg_height and pkg_height > 0 else 0
 
-        if actual_kg is not None and vol_kg is not None:
-            weight_kg = max(actual_kg, vol_kg)
-        elif actual_kg is not None:
-            weight_kg = actual_kg
-        elif vol_kg is not None:
-            weight_kg = vol_kg
-
-        # グラム単位で切り上げ
-        if weight_kg is not None:
-            weight_kg = math.ceil(weight_kg * 1000) / 1000
-
-        return title, price_str, url, weight_kg
+        return title, price_str, url, weight_kg, length_cm, width_cm, height_cm
 
     except Exception as e:
         print(f"  [Keepa] エラー: {e}")
-        return None, None, None, None
+        return None, None, None, None, 0, 0, 0
 
 
 # ==========================================
@@ -487,16 +448,22 @@ def get_ebay_active_lowest(jan: str, ebay_driver, title_kw: str = "") -> tuple[f
 # Step 4: 利益計算
 # ==========================================
 def calc_profit(ebay_usd: float, amazon_jpy: int, rate: float,
-                weight_kg: float | None = None) -> dict:
+                weight_kg: float | None = None,
+                length_cm: float = 0, width_cm: float = 0, height_cm: float = 0) -> dict:
     """
-    利益計算式（SpeedPAK Economy Japan USA本土48州）:
+    利益計算式（SpeedPAK EconomyとFedEx International Connect Plusの安い方を使用）:
       利益 = eBay販売価格×レート
              − 仕入れ価格
              − eBay手数料（17%）
              − 関税（仕入れの15%）
-             − SpeedPAK基本送料（重量別）
-             − 米国輸入通関手数料（¥245/件）
-             − 米国関税処理手数料（関税額×2.1%）
+             − 国際送料（SpeedPAK/FedExの安い方。米国向けはSpeedPAK採用時のみ
+               通関手数料¥245が内訳に含まれる。FedEx International Connect Plusは
+               当該手数料が無料のため加算されない）
+             − 米国関税処理手数料（関税額×2.1%。carrier非依存のためどちらでも加算）
+
+    length_cm/width_cm/height_cm を渡すと、キャリアごとに異なる容積重量の
+    割り算値（SpeedPAK ÷8,000 / FedEx ÷5,000）を踏まえた請求重量で計算する。
+    省略時は weight_kg（実重量）のみで計算する。
     """
     if weight_kg is None or weight_kg <= 0:
         weight_kg = DEFAULT_WEIGHT_KG
@@ -504,9 +471,12 @@ def calc_profit(ebay_usd: float, amazon_jpy: int, rate: float,
     revenue_jpy      = ebay_usd * rate
     ebay_fee_jpy     = revenue_jpy * EBAY_FEE_RATE
     customs_jpy      = amazon_jpy * CUSTOMS_RATE
-    base_shipping    = get_speedpak_rate_us48(weight_kg)
+    shipping_detail  = get_shipping_jpy(weight_kg, destination="US48",
+                                        length_cm=length_cm, width_cm=width_cm, height_cm=height_cm,
+                                        return_detail=True)
+    base_shipping    = shipping_detail["jpy"]
     us_processing    = round(customs_jpy * US_CUSTOMS_PROCESSING_RATE)
-    total_shipping   = base_shipping + US_CUSTOMS_CLEARANCE_FEE + us_processing
+    total_shipping   = base_shipping + us_processing
     profit_jpy       = revenue_jpy - amazon_jpy - ebay_fee_jpy - customs_jpy - total_shipping
 
     return {
@@ -515,7 +485,7 @@ def calc_profit(ebay_usd: float, amazon_jpy: int, rate: float,
         "customs_jpy":    round(customs_jpy),
         "weight_kg":      weight_kg,
         "base_shipping":  base_shipping,
-        "us_clearance":   US_CUSTOMS_CLEARANCE_FEE,
+        "shipping_carrier": shipping_detail["carrier"],
         "us_processing":  us_processing,
         "shipping_jpy":   total_shipping,
         "profit_jpy":     round(profit_jpy),
@@ -592,20 +562,21 @@ def research_one(jan: str, rate: float, ws, dry_run: bool,
 
     ebay_title = ""
 
-    # ── Keepa: 商品名・価格・URL・重量取得（Step1/2で共用）────
+    # ── Keepa: 商品名・価格・URL・実重量・寸法取得（Step1/2で共用）────
     keepa_key = _get_keepa_api_key()
     print("  [Keepa] 商品情報取得中...")
-    amazon_title, amazon_price_str, amazon_url, weight_kg = (
-        get_keepa_info(jan, keepa_key) if keepa_key else (None, None, None, None)
+    amazon_title, amazon_price_str, amazon_url, weight_kg, length_cm, width_cm, height_cm = (
+        get_keepa_info(jan, keepa_key) if keepa_key else (None, None, None, None, 0, 0, 0)
     )
     if amazon_title:
         print(f"          商品名: {amazon_title[:60]}")
     if amazon_price_str:
         print(f"          価格 : {amazon_price_str}")
     if weight_kg:
-        print(f"          請求重量: {weight_kg:.3f} kg")
+        dims = f" ({length_cm:.0f}×{width_cm:.0f}×{height_cm:.0f}cm)" if length_cm else ""
+        print(f"          実重量: {weight_kg:.3f} kg{dims}")
     else:
-        print(f"          請求重量: 不明 → デフォルト {DEFAULT_WEIGHT_KG} kg を使用")
+        print(f"          実重量: 不明 → デフォルト {DEFAULT_WEIGHT_KG} kg を使用")
     if not keepa_key:
         print("  ⚠️  KEEPA_API_KEY未設定")
 
@@ -656,14 +627,16 @@ def research_one(jan: str, rate: float, ws, dry_run: bool,
 
     # ── Step 4: 利益計算 ─────────────────────────
     print(f"  [Step 4] 利益計算... (レート: ¥{rate:.1f}/USD, 価格ソース: {price_source})")
-    profit = calc_profit(ebay_usd, amazon_jpy, rate, weight_kg)
+    profit = calc_profit(ebay_usd, amazon_jpy, rate, weight_kg,
+                         length_cm=length_cm, width_cm=width_cm, height_cm=height_cm)
 
     used_weight = profit['weight_kg']
     print(f"           売上   : ¥{profit['revenue_jpy']:>8,}")
     print(f"           仕入れ : ¥{amazon_jpy:>8,}  (−)")
     print(f"           eBay手数料: ¥{profit['ebay_fee_jpy']:>6,}  (−)")
     print(f"           関税   : ¥{profit['customs_jpy']:>8,}  (−)")
-    print(f"           送料   : ¥{profit['shipping_jpy']:>8,}  (−)  [{used_weight:.3f}kg: 基本¥{profit['base_shipping']:,} + 通関¥{profit['us_clearance']} + 関税処理¥{profit['us_processing']}]")
+    print(f"           送料   : ¥{profit['shipping_jpy']:>8,}  (−)  [{used_weight:.3f}kg: "
+          f"{profit['shipping_carrier']}¥{profit['base_shipping']:,} + 関税処理¥{profit['us_processing']}]")
     print(f"           {'─'*30}")
     judgment = "✅ GO" if profit["is_go"] else "❌ No-Go"
     print(f"           利益   : ¥{profit['profit_jpy']:>8,}  → {judgment}")

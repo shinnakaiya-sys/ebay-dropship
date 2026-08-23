@@ -324,13 +324,15 @@ def run_adjust(sheets: SheetsManager, ebay, keepa, dry_run: bool,
             jan_code  = str(product.get("JANコード", "")).strip()
             asin_code = str(product.get("ASIN", "")).strip()
             weight_kg = sheets.get_weight_from_research(jan_code) if jan_code else None
+            length_cm = width_cm = height_cm = 0
             if weight_kg is None and asin_code and keepa:
-                weight_kg = keepa.get_weight(asin_code)
+                weight_kg, length_cm, width_cm, height_cm = keepa.get_weight(asin_code)
                 if weight_kg:
-                    print(f"  📦 Keepaから重量取得: {weight_kg}kg")
+                    print(f"  📦 Keepaから重量取得: {weight_kg}kg ({length_cm:.0f}×{width_cm:.0f}×{height_cm:.0f}cm)")
             weight_kg = weight_kg or 1.0
 
-            cost_floor  = calc_sell_price(float(base_raw), product_config, weight_kg, min_price=product_min)
+            cost_floor  = calc_sell_price(float(base_raw), product_config, weight_kg, min_price=product_min,
+                                          length_cm=length_cm, width_cm=width_cm, height_cm=height_cm)
 
             target    = round(rival_price - 0.01, 2)
             new_price = max(target, cost_floor)

@@ -225,8 +225,16 @@ class KeepaChecker:
         result["jan_code"] = jan_code
         return result
 
-    def get_weight(self, asin: str) -> float | None:
-        """ASINから請求重量(kg)のみを取得（history=0でトークン節約）"""
+    def get_weight(self, asin: str) -> tuple[float | None, float, float, float]:
+        """
+        ASINから実重量(kg)と寸法(cm)を取得（history=0でトークン節約）
+
+        戻り値: (実重量kg, 長さcm, 幅cm, 高さcm)
+
+        容積重量の割り算値はキャリアごとに異なる（SpeedPAK ÷8,000 / FedEx ÷5,000）ため、
+        ここでは合成せず実重量と寸法のみを返す。容積重量との比較は
+        shipping_calculator.get_shipping_jpy() 側に委ねる。
+        """
         import requests
         try:
             resp = requests.get(
@@ -236,28 +244,25 @@ class KeepaChecker:
             )
             products = resp.json().get("products", [])
             if not products:
-                return None
+                return None, 0, 0, 0
             p          = products[0]
             pkg_weight = p.get("packageWeight")  # grams
             pkg_length = p.get("packageLength")  # mm
             pkg_width  = p.get("packageWidth")   # mm
             pkg_height = p.get("packageHeight")  # mm
-            actual_kg = pkg_weight / 1000.0 if pkg_weight and pkg_weight > 0 else None
-            vol_kg    = None
-            if pkg_length and pkg_width and pkg_height and pkg_length > 0:
-                vol_kg = (pkg_length / 10) * (pkg_width / 10) * (pkg_height / 10) / 8000
-            if actual_kg is not None and vol_kg is not None:
-                weight_kg = max(actual_kg, vol_kg)
-            elif actual_kg is not None:
-                weight_kg = actual_kg
-            elif vol_kg is not None:
-                weight_kg = vol_kg
-            else:
-                return None
-            return math.ceil(weight_kg * 1000) / 1000
+
+            weight_kg = None
+            if pkg_weight and pkg_weight > 0:
+                weight_kg = math.ceil(pkg_weight / 1000.0 * 1000) / 1000  # g → kg、グラム単位で切り上げ
+
+            length_cm = pkg_length / 10 if pkg_length and pkg_length > 0 else 0
+            width_cm  = pkg_width  / 10 if pkg_width  and pkg_width  > 0 else 0
+            height_cm = pkg_height / 10 if pkg_height and pkg_height > 0 else 0
+
+            return weight_kg, length_cm, width_cm, height_cm
         except Exception as e:
             print(f"  ⚠️  Keepa重量取得失敗 ({asin}): {e}")
-            return None
+            return None, 0, 0, 0
 
     def _empty_result(self, asin: str) -> dict:
         return {
