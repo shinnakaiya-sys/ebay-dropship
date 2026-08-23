@@ -1,16 +1,30 @@
-# GitHub Actions: 24時間ごと自動実行ワークフロー
+# GitHub Actions: 1日4回自動実行ワークフロー
 # .github/workflows/daily_check.yml に配置
+#
+# Keepaのトークンバケット（上限1,200・20トークン/分で補充）は1回の実行で
+# ほぼ使い切ってしまうため、1日1回実行だと補充分の大半が無駄になり
+# 全商品（3,000件超）を1周チェックするのに約12日かかっていた。
+# 6時間おきに分割することで、1日の補充量をより多く消費できるようにする。
 
-name: 24時間ごとチェック（価格・在庫）
+name: 1日4回チェック（価格・在庫）
 
 on:
-  # 24時間ごとに実行（JST 10:23 = UTC 1:23）
-  # ※ 整数時刻・*/24 は混雑でスキップされやすいため端数時刻に設定
+  # 6時間おきに実行（JST 10:23 / 16:23 / 22:23 / 4:23 = UTC 1:23 / 7:23 / 13:23 / 19:23）
+  # ※ 整数時刻・*/6 は混雑でスキップされやすいため端数時刻に設定
   schedule:
     - cron: "23 1 * * *"
+    - cron: "23 7 * * *"
+    - cron: "23 13 * * *"
+    - cron: "23 19 * * *"
 
   # 手動実行ボタン
   workflow_dispatch:
+
+# 前回の実行が長引いた場合に次のスケジュール実行と重なり、
+# 同じGoogle Sheetsに同時書き込みされるのを防ぐ（重複時は待機、キャンセルはしない）
+concurrency:
+  group: daily-check
+  cancel-in-progress: false
 
 jobs:
   daily-check:
@@ -46,5 +60,5 @@ jobs:
         env:
           GSHEET_CREDENTIALS: ${{ secrets.GSHEET_CREDENTIALS }}
 
-      - name: 毎日チェック実行
+      - name: 価格・在庫チェック実行
         run: python run.py
