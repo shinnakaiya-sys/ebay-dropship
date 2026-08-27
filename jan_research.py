@@ -8,6 +8,7 @@ Step 1: eBay Sold Items 確認（過去30日）
 Step 2: Amazon.co.jp 仕入れ価格取得
 Step 3: eBay Active Listings 最安値・URL取得（新品のみ）
 Step 4: 利益計算 → GO/No-Go判定
+        → GOの場合はJANコードを「出品待ちリスト」タブのA列に自動追加
 
 利益計算式:
   利益(JPY) = eBay最安値(USD) × 為替レート
@@ -49,8 +50,9 @@ from shipping_calculator import get_shipping_jpy
 # ==========================================
 CLIENT_ID      = os.getenv("EBAY_CLIENT_ID") or os.getenv("EBAY_APP_ID", "")
 CLIENT_SECRET  = os.getenv("EBAY_CLIENT_SECRET", "")
-SPREADSHEET_ID = "1GEGnGQtb5Fb76W9Nyd5gGM-igQAe1-U9-W2nmhVjaB8"
-TAB_NAME       = "新品リサーチ"
+SPREADSHEET_ID   = "1GEGnGQtb5Fb76W9Nyd5gGM-igQAe1-U9-W2nmhVjaB8"
+TAB_NAME         = "新品リサーチ"
+PENDING_TAB_NAME = "出品待ちリスト"
 JSON_FILE      = "credentials.json"
 SCOPE          = ["https://spreadsheets.google.com/feeds",
                   "https://www.googleapis.com/auth/drive"]
@@ -550,12 +552,40 @@ def write_to_sheet(ws, jan: str, result: dict, dry_run: bool):
     time.sleep(0.5)
 
 
+def add_to_pending_list(pending_ws, jan: str, memo: str, dry_run: bool):
+    """
+    GO判定の商品を「出品待ちリスト」タブに追記する。
+    列構成（A〜D）: A=JANコード, B=ステータス, C=登録日, D=メモ
+    既に同じJANコードが登録済みの場合は追加しない。
+    """
+    if dry_run:
+        print(f"  [DRY-RUN] 出品待ちリストへ追加予定: JAN={jan}")
+        return
+
+    existing_jans = pending_ws.col_values(1)  # A列: JANコード
+    if jan in existing_jans:
+        print(f"  ℹ️  出品待ちリストに既存のためスキップ: JAN={jan}")
+        return
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    row_data = [jan, "待機中", today, memo]
+
+    next_row = len(pending_ws.get_all_values()) + 1
+    sheet_row_count = pending_ws.row_count
+    if next_row > sheet_row_count:
+        pending_ws.add_rows(100)
+    pending_ws.update(f'A{next_row}', [row_data], value_input_option='USER_ENTERED')
+    print(f"  ➕ 出品待ちリストに追加: JAN={jan}")
+    time.sleep(0.5)
+
+
 # ==========================================
 # 1件のJANコードを処理
 # ==========================================
 def research_one(jan: str, rate: float, ws, dry_run: bool,
                  account: str = "kozuki", force: bool = False,
-                 manual_sold: int = 0, driver=None, ebay_driver=None) -> dict:
+                 manual_sold: int = 0, driver=None, ebay_driver=None,
+                 pending_ws=None) -> dict:
     print(f"\n{'─'*55}")
     print(f"  JAN: {jan}")
     print(f"{'─'*55}")
@@ -662,6 +692,10 @@ def research_one(jan: str, rate: float, ws, dry_run: bool,
     }
 
     write_to_sheet(ws, jan, result, dry_run)
+
+    if result["is_go"] and pending_ws is not None:
+        add_to_pending_list(pending_ws, jan, product_name, dry_run)
+
     return result
 
 
@@ -739,9 +773,11 @@ def main():
     print(f"  ✅ USD/JPY: ¥{rate:.1f}")
 
     print("[初期化] スプレッドシート接続中...")
-    creds  = Credentials.from_service_account_file(JSON_FILE, scopes=SCOPE)
-    client = gspread.authorize(creds)
-    ws     = client.open_by_key(SPREADSHEET_ID).worksheet(TAB_NAME)
+    creds      = Credentials.from_service_account_file(JSON_FILE, scopes=SCOPE)
+    client     = gspread.authorize(creds)
+    spreadsheet = client.open_by_key(SPREADSHEET_ID)
+    ws         = spreadsheet.worksheet(TAB_NAME)
+    pending_ws = spreadsheet.worksheet(PENDING_TAB_NAME)
     print("  ✅ 接続成功")
 
     # Terapeak ドライバー起動
@@ -781,7 +817,7 @@ def main():
 
             result = research_one(jan, rate, ws, dry_run, account=account,
                                   force=force, manual_sold=manual_sold, driver=t_driver,
-                                  ebay_driver=ebay_driver)
+                                  ebay_driver=ebay_driver, pending_ws=pending_ws)
 
             if result["status"] == "skipped":
                 summary["skipped"].append(jan)

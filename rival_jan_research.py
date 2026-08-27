@@ -183,7 +183,7 @@ def scrape_sold_items(seller_id, max_items):
 
 def get_gtin_from_item_page(item_id, driver):
     """
-    SeleniumでeBayアイテムページを開き GTIN・タイトル・MPN を取得する。
+    SeleniumでeBayアイテムページを開き GTIN・タイトル・MPN・Age Level を取得する。
     Browse APIを使わないためレートリミットを回避できる。
     """
     from selenium.webdriver.common.by import By
@@ -193,14 +193,14 @@ def get_gtin_from_item_page(item_id, driver):
         time.sleep(2)
 
         src = driver.page_source
-        gtin, title, mpn = "", "", ""
+        gtin, title, mpn, age_level = "", "", "", ""
 
         # ① ページソースの JSON-LD から GTIN（最速）
         m = re.search(r'"gtin(?:13)?"\s*:\s*"(\d{8,14})"', src)
         if m:
             gtin = m.group(1)
 
-        # ② item specifics テーブルから UPC / EAN / JAN / MPN
+        # ② item specifics テーブルから UPC / EAN / JAN / MPN / Age Level
         for row in driver.find_elements(By.CSS_SELECTOR, ".ux-labels-values"):
             lines = [l.strip() for l in row.text.split("\n") if l.strip()]
             if len(lines) < 2:
@@ -213,6 +213,8 @@ def get_gtin_from_item_page(item_id, driver):
                 mpn = value
             elif label in ("title", "name") and not title:
                 title = value
+            elif label == "age level" and not age_level:
+                age_level = value
 
         # ③ ページタイトルからタイトル補完
         if not title:
@@ -220,16 +222,34 @@ def get_gtin_from_item_page(item_id, driver):
             if "|" in page_title:
                 title = page_title.split("|")[0].strip()
 
-        return gtin, title, mpn
+        return gtin, title, mpn, age_level
 
     except Exception as e:
         print(f"    ⚠ ページ取得エラー ({item_id}): {e}")
-        return "", "", ""
+        return "", "", "", ""
 
 
 def is_japan_jan(code):
     return len(code) == 13 and code.isdigit() and (
         code.startswith("45") or code.startswith("49"))
+
+
+_AGE_LEVEL_NUM_RE = re.compile(r"\d+")
+
+
+def requires_cpc(age_level: str) -> bool:
+    """eBayのAge Level仕様値から、対象年齢3歳以上の子供向け玩具（CPC必須）かを判定する。
+    Adult・月齢のみの表記（3歳未満相当）・空欄は対象外。範囲表記(例: "8-13 Years")は
+    どちらかの端が3〜12歳に収まっていれば対象とする（一部でも子供向け対象年齢に
+    かかるならCPSIA上の「子供向け製品」に該当するため）。13歳以上のみの表記
+    （例: "13-17 Years"）は対象外。"""
+    if not age_level:
+        return False
+    v = age_level.strip().lower()
+    if "adult" in v or "month" in v:
+        return False
+    nums = [int(n) for n in _AGE_LEVEL_NUM_RE.findall(v)]
+    return any(3 <= n <= 12 for n in nums)
 
 
 def extract_model_from_title(title):
@@ -333,13 +353,15 @@ def run_one_seller(seller_id, account, max_items, dry_run, japan_only):
                 print(f"  [ドライバー再起動 {i}/{total}]")
                 driver = create_driver()
 
-            gtin, title, mpn = get_gtin_from_item_page(item_id, driver)
+            gtin, title, mpn, age_level = get_gtin_from_item_page(item_id, driver)
 
             # GTIN未取得かつMPN/タイトルありなら Browse API で補完（レートリミット時は無視）
             if not gtin and (title or mpn):
                 gtin = get_jan_from_title_or_mpn(title, mpn)
 
-            if gtin and (not japan_only or is_japan_jan(gtin)):
+            if requires_cpc(age_level):
+                print(f"  [{i+1}/{total}] {item_id} → CPC対象(Age Level: {age_level}) 除外")
+            elif gtin and (not japan_only or is_japan_jan(gtin)):
                 jan_set.add(gtin)
                 print(f"  [{i+1}/{total}] {item_id} → {gtin} ✅")
             else:

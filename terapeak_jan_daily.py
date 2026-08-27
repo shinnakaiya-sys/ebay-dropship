@@ -67,6 +67,23 @@ EBAY_CLIENT_ID     = os.getenv("EBAY_CLIENT_ID") or os.getenv("EBAY_APP_ID", "")
 EBAY_CLIENT_SECRET = os.getenv("EBAY_CLIENT_SECRET", "")
 JP_JAN_RE = re.compile(r"^(45|49)\d{11}$")
 
+_AGE_LEVEL_NUM_RE = re.compile(r"\d+")
+
+
+def requires_cpc(age_level: str) -> bool:
+    """eBayのAge Level仕様値から、対象年齢3歳以上の子供向け玩具（CPC必須）かを判定する。
+    Adult・月齢のみの表記（3歳未満相当）・空欄は対象外。範囲表記(例: "8-13 Years")は
+    どちらかの端が3〜12歳に収まっていれば対象とする（一部でも子供向け対象年齢に
+    かかるならCPSIA上の「子供向け製品」に該当するため）。13歳以上のみの表記
+    （例: "13-17 Years"）は対象外。"""
+    if not age_level:
+        return False
+    v = age_level.strip().lower()
+    if "adult" in v or "month" in v:
+        return False
+    nums = [int(n) for n in _AGE_LEVEL_NUM_RE.findall(v)]
+    return any(3 <= n <= 12 for n in nums)
+
 VALID_ACCOUNTS  = {"kozuki", "kaworu", "dbz"}
 JAN_BATCH_SIZE  = 30         # jan_research.pyへ流す単位（rival_jan_research.pyと同じ）
 
@@ -264,6 +281,7 @@ def fetch_gtins(item_ids: list[str], token: str) -> tuple[dict, list[str]]:
             "epid": it.get("epid") or "",
             "category": it.get("categoryPath") or "",
             "seller": (it.get("seller") or {}).get("username", ""),
+            "age_level": specs.get("age level", ""),
         }
         if (i + 1) % 50 == 0 or (i + 1) == total:
             print(f"[browse] {i + 1}/{total} 件照会")
@@ -335,7 +353,7 @@ def main():
     if pending_set:
         print(f"[browse] レート制限等により {len(pending_set)} 件は今回未照会 → 次回実行時に再照会されます")
 
-    picked = []
+    picked, cpc_excluded = [], 0
     for r in targets:
         extra = info.get(r["item_id"], {})
         gtin = (extra.get("gtin") or "").strip()
@@ -343,10 +361,16 @@ def main():
             continue
         if not args.all_gtin and not JP_JAN_RE.match(gtin):
             continue
+        if requires_cpc(extra.get("age_level", "")):
+            cpc_excluded += 1
+            continue
         r.update(extra)
         r["jan"] = gtin
         r["url"] = f"https://www.ebay.com/itm/{r['item_id']}"
         picked.append(r)
+
+    if cpc_excluded:
+        print(f"[cpc] 対象年齢3歳以上の子供向け玩具（CPC必須）のため除外: {cpc_excluded}件")
 
     # ── CSV監査ログ ──────────────────────────────
     OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -354,7 +378,7 @@ def main():
     out = OUT_DIR / f"terapeak_jan_{stamp}.csv"
     cols = ["jan", "title", "avg_sold_price", "avg_shipping", "total_sold",
             "total_sales", "date_last_sold", "brand", "mpn", "epid",
-            "category", "seller", "item_id", "url"]
+            "category", "seller", "age_level", "item_id", "url"]
     with out.open("w", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
         w.writeheader()
