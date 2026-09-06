@@ -8,13 +8,22 @@ import requests
 from dotenv import load_dotenv
 
 # 複数アカウント対応: EBAY_ENV_PATH が指定されていれば、そのアカウント専用
-# .env を優先して読み込む(既存の値は上書き)。未指定時は従来通りカレント
-# ディレクトリの .env を読む(kaworu2021運用への影響なし)。
+# .env を優先して読み込む。未指定時は従来通りカレントディレクトリの .env を読む。
+#
+# どちらの場合も override=True が必須: override=False（デフォルト）だと、
+# シェルに既にEBAY_TOKEN等が環境変数としてexportされていた場合
+# （例: 同じターミナルタブで直前にebay_dvz/ebay-kozukiディレクトリの
+# .envをsource/exportして作業していた等）、.envの値ではなく
+# その残留値が黙って優先されてしまう。実際にこれが原因で、
+# kaworu2021向けのはずの出品が別アカウント(dbz_park)のトークンで
+# 実行され、別アカウント名義で出品されてしまう事故が発生した
+# (2026-09-06、--asin手動実行の2件で発生。通常のバッチ実行は
+# 別プロセス起動のため影響なし)。
 _account_env_path = os.getenv("EBAY_ENV_PATH")
 if _account_env_path:
     load_dotenv(os.path.expanduser(_account_env_path), override=True)
 else:
-    load_dotenv()
+    load_dotenv(override=True)
 
 
 def _fetch_jpy_rate(fallback: float = 155.0) -> float:

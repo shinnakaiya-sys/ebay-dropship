@@ -109,6 +109,38 @@ def _search_csv_categories(title: str, brand: str = "", n: int = 40) -> list[tup
     return [(label, cat_id) for _, cat_id, label in scored[:n]]
 
 
+def _fix_mojibake(text: str) -> str:
+    """
+    UTF-8バイト列がLatin-1として誤デコードされた文字化け（例: "ã¦ã§ã¢"）を復元する。
+    正しい日本語/英語テキストはcodepoint>255を含むためencode('latin-1')が例外になり
+    無変換のまま返るので、本物の日本語や通常の英数字には影響しない。
+    """
+    if not text:
+        return text
+    try:
+        fixed = text.encode("latin-1").decode("utf-8")
+        return fixed if fixed != text else text
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return text
+
+
+_REFUSAL_MARKERS = (
+    "i can't", "i cannot", "i can not", "i'm not able", "i am not able",
+    "i won't", "i'm unable", "i am unable", "as an ai", "i apologize",
+    "i'm sorry", "sorry, i", "i don't feel comfortable", "against my",
+    "i'm not going to", "cannot create a title", "can't create a title",
+    "cannot generate", "can't generate", "cannot assist", "can't assist",
+    "cannot help with", "can't help with",
+)
+
+def _is_llm_refusal(text: str) -> bool:
+    """LLMがタイトル生成を拒否し、拒否文をそのまま返した場合を検出する（成人向け商品等での誤爆防止）"""
+    if not text:
+        return False
+    lowered = text.lower()
+    return any(marker in lowered for marker in _REFUSAL_MARKERS)
+
+
 EBAY_API_URL = "https://api.ebay.com/ws/api.dll"
 # テスト環境:
 # EBAY_API_URL = "https://api.sandbox.ebay.com/ws/api.dll"
@@ -323,7 +355,7 @@ class EbayLister:
         title       = self._escape_xml(p["title"][:80])
         price       = p["price_usd"]
         cat_id      = p.get("category_id", EBAY_CATEGORY_MAP["default"])
-        cond_id     = self._condition_id(p.get("condition", "New"))
+        cond_id     = self._get_condition_id(cat_id, p.get("condition", "New"))
         desc        = p["description"].replace("]]>", "]]]]><![CDATA[>")
         upc         = p.get("upc", "Does not apply")
         stock_count = max(1, int(p.get("stock_count", 1)))
@@ -447,6 +479,70 @@ class EbayLister:
     # ──────────────────────────────────────────────────────
     def _condition_id(self, condition: str) -> int:
         return 1000 if condition == "New" else 3000  # 1000=New, 3000=Used
+
+    def _fetch_category_conditions(self, category_id: int) -> list[tuple[int, str]]:
+        """GetCategoryFeaturesでカテゴリごとの有効なConditionValuesを取得する"""
+        xml_body = (
+            '<?xml version="1.0" encoding="utf-8"?>'
+            '<GetCategoryFeaturesRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
+            f"<RequesterCredentials><eBayAuthToken>{self.token}</eBayAuthToken></RequesterCredentials>"
+            f"<CategoryID>{category_id}</CategoryID>"
+            "<DetailLevel>ReturnAll</DetailLevel>"
+            "<IncludeSelector>ConditionValues</IncludeSelector>"
+            "</GetCategoryFeaturesRequest>"
+        )
+        try:
+            resp = requests.post(
+                EBAY_API_URL,
+                headers={**self.headers, "X-EBAY-API-CALL-NAME": "GetCategoryFeatures"},
+                data=xml_body.encode("utf-8"),
+                timeout=15,
+            )
+            root = ET.fromstring(resp.text)
+            ns = {"e": "urn:ebay:apis:eBLBaseComponents"}
+            result = []
+            for cond in root.findall(".//e:Category/e:ConditionValues/e:Condition", ns):
+                cid_text = cond.findtext("e:ID", namespaces=ns)
+                name = cond.findtext("e:DisplayName", namespaces=ns) or ""
+                if cid_text:
+                    result.append((int(cid_text), name))
+            return result
+        except Exception as e:
+            print(f"  ⚠️  カテゴリConditionValues取得失敗（category={category_id}）: {e}")
+            return []
+
+    def _get_condition_id(self, category_id: int, condition: str) -> int:
+        """
+        カテゴリ固有の有効なConditionIDを返す。
+        トレーディングカード等の一部カテゴリは標準のNew(1000)/Used(3000)ではなく
+        カテゴリ専用のcondition enum（Ungraded等）しか受け付けないため、
+        GetCategoryFeaturesで実際に有効な値を確認してから選ぶ。
+        取得できない場合は従来の固定値にフォールバックする。
+        """
+        if not hasattr(self, "_condition_cache"):
+            self._condition_cache = {}
+        if category_id not in self._condition_cache:
+            self._condition_cache[category_id] = self._fetch_category_conditions(category_id)
+        conditions = self._condition_cache[category_id]
+
+        fallback = self._condition_id(condition)
+        if not conditions:
+            return fallback
+
+        want_new = condition == "New"
+        for cid, name in conditions:
+            name_lower = name.lower()
+            if want_new and "new" in name_lower and "refurb" not in name_lower:
+                return cid
+            if not want_new and "used" in name_lower:
+                return cid
+
+        # 標準のNew/Usedが存在しないカテゴリ（トレーディングカード等）
+        for cid, name in conditions:
+            if "ungraded" in name.lower():
+                return cid
+        print(f"  ⚠️  カテゴリ{category_id}にNew/Used/Ungraded相当が無し → 最初の候補を使用: {conditions[0][1]}")
+        return conditions[0][0]
 
     def _escape_xml(self, text: str) -> str:
         return (text
@@ -777,7 +873,9 @@ Reply with ONLY the title. No quotes. No explanation."""
 
     try:
         title = _call_title_api(prompt)
-        if not title or len(title.strip("*").strip()) < 5:
+        if not title or len(title.strip("*").strip()) < 5 or _is_llm_refusal(title):
+            if _is_llm_refusal(title):
+                print(f"  ⚠️  タイトル生成: LLMが拒否文を返却 → フォールバック使用（{title[:60]}...）")
             return fallback
 
         # 75文字未満なら拡張リトライ（1回）
@@ -793,7 +891,7 @@ Brand: {brand or "N/A"} | Model: {model or "N/A"}
 Add keywords like: material, dimensions, color, compatibility, quantity, product type synonyms. Do NOT add "New" or "Japan" as filler.
 Reply with ONLY the expanded title. No quotes."""
             expanded = _call_title_api(expand_prompt)
-            if expanded and len(expanded) > len(title):
+            if expanded and len(expanded) > len(title) and not _is_llm_refusal(expanded):
                 title = expanded
 
         print(f"  🌐 {log_prefix}: {title} ({len(title)}文字)")
@@ -1057,36 +1155,55 @@ Create HTML description with these sections:
 
 Use inline CSS for styling. Keep total under 800 words. Reply with ONLY the HTML."""
 
-    try:
-        resp = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "Content-Type": "application/json",
-                "x-api-key": CONFIG.get("ANTHROPIC_API_KEY", ""),
-                "anthropic-version": "2023-06-01",
-            },
-            json={
-                "model": "claude-haiku-4-5-20251001",
-                "max_tokens": 1500,
-                "messages": [{"role": "user", "content": prompt}]
-            },
-            timeout=30,
-        )
-        data = resp.json()
-        if resp.status_code != 200 or data.get("type") == "error":
-            err = data.get("error", data)
-            raise RuntimeError(f"説明文生成失敗: HTTP {resp.status_code} / {err}")
-        if data.get("content"):
-            html = data["content"][0]["text"].strip()
-            # コードブロックを除去
-            if html.startswith("```"):
-                html = html.split("\n", 1)[1].rsplit("```", 1)[0]
-            print(f"  📝 SEO説明文生成完了（{len(html)}文字）")
-            return html
-    except RuntimeError:
-        raise
-    except Exception as e:
-        raise RuntimeError(f"説明文生成失敗: {e}") from e
+    RETRYABLE_STATUS = {429, 500, 502, 503, 529}
+    max_retries = 5
+    backoff = 2.0
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            resp = requests.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "Content-Type": "application/json",
+                    "x-api-key": CONFIG.get("ANTHROPIC_API_KEY", ""),
+                    "anthropic-version": "2023-06-01",
+                },
+                json={
+                    "model": "claude-haiku-4-5-20251001",
+                    "max_tokens": 1500,
+                    "messages": [{"role": "user", "content": prompt}]
+                },
+                timeout=30,
+            )
+            data = resp.json()
+            if resp.status_code != 200 or data.get("type") == "error":
+                err = data.get("error", data)
+                if resp.status_code in RETRYABLE_STATUS and attempt < max_retries:
+                    wait = backoff * (2 ** (attempt - 1))
+                    print(f"  ⚠️ 説明文生成 HTTP {resp.status_code}（{err}）— {wait:.0f}秒後にリトライ（{attempt}/{max_retries}）")
+                    time.sleep(wait)
+                    continue
+                raise RuntimeError(f"説明文生成失敗: HTTP {resp.status_code} / {err}")
+            if data.get("content"):
+                html = data["content"][0]["text"].strip()
+                # コードブロックを除去
+                if html.startswith("```"):
+                    html = html.split("\n", 1)[1].rsplit("```", 1)[0]
+                print(f"  📝 SEO説明文生成完了（{len(html)}文字）")
+                return html
+        except RuntimeError:
+            raise
+        except requests.exceptions.RequestException as e:
+            if attempt < max_retries:
+                wait = backoff * (2 ** (attempt - 1))
+                print(f"  ⚠️ 説明文生成 通信エラー（{e}）— {wait:.0f}秒後にリトライ（{attempt}/{max_retries}）")
+                time.sleep(wait)
+                continue
+            raise RuntimeError(f"説明文生成失敗: {e}") from e
+        except Exception as e:
+            raise RuntimeError(f"説明文生成失敗: {e}") from e
+
+    raise RuntimeError("説明文生成失敗: リトライ上限に到達")
 
     raise RuntimeError("説明文生成失敗: APIレスポンスが空")
 
@@ -1190,8 +1307,8 @@ def fetch_listing_details(keepa_api, asin: str) -> dict:
 
         upc_list = p.get("upcList") or []
         ean_list = p.get("eanList") or []
-        part_num = p.get("partNumber") or ""
-        model    = p.get("model") or ""
+        part_num = _fix_mojibake(p.get("partNumber") or "")
+        model    = _fix_mojibake(p.get("model") or "")
 
         upc = ean_list[0] if ean_list else (upc_list[0] if upc_list else "Does not apply")
         raw_mpn = str(part_num or model or "").strip()
@@ -1216,10 +1333,10 @@ def fetch_listing_details(keepa_api, asin: str) -> dict:
             print(f"  ⚖️  重量不明 → デフォルト1.0kgを使用")
 
         return {
-            "title":         p.get("title", ""),
-            "brand":         p.get("brand", "") or "Does Not Apply",
-            "manufacturer":  p.get("manufacturer", ""),
-            "features":      features,
+            "title":         _fix_mojibake(p.get("title", "")),
+            "brand":         _fix_mojibake(p.get("brand", "")) or "Does Not Apply",
+            "manufacturer":  _fix_mojibake(p.get("manufacturer", "")),
+            "features":      [_fix_mojibake(f) for f in features],
             "image_urls":    image_urls,
             "current_price": price,
             "in_stock":      in_stock,
