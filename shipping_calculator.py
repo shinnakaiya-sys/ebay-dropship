@@ -233,6 +233,15 @@ FEDEX_ZONE_MAP = {
     "AU":       "AU_NZ",
 }
 
+# 混雑時割増金（Demand Surcharge）2026-09-02改定、SpeedPAK Ship via FedEx（日本発・円/kg）
+# 出典: Orange Connex 改定通知
+FEDEX_DEMAND_SURCHARGE_JPY_PER_KG = {
+    "USW":    65,   # アメリカ・プエルトリコ
+    "USE_CA": 65,   # アメリカ・プエルトリコ / カナダ
+    "DE_GB":  162,  # ヨーロッパ（Europe）
+    "AU_NZ":  46,   # オーストラリア・ニュージーランド
+}
+
 _FEDEX_VOLUMETRIC_DIVISOR = 5000  # FedEx: 長さ×幅×高さ(cm) ÷ 5,000（SpeedPAKは8,000）
 
 
@@ -316,13 +325,18 @@ def get_fedex_shipping_jpy(
     FedEx International Connect Plus送料（JPY）を計算して返す
 
     個人宅配達料・米国輸入手続き手数料はFICPで無料のため加算しない。
-    燃料割増金・混雑時割増金は料金ガイドに固定額の記載がないため計算に含めない
+    燃料割増金は料金ガイドに固定額の記載がないため計算に含めない
     （SpeedPAK側も同様に変動サーチャージは含めていない）。
+    混雑時割増金（Demand Surcharge）は2026-09-02改定でゾーンごとの固定円/kgが
+    通知されたため FEDEX_DEMAND_SURCHARGE_JPY_PER_KG を加算する。
     """
     zone  = FEDEX_ZONE_MAP.get(destination, "USE_CA")
     table = FEDEX_RATE_TABLES[zone]
     billed = calc_billed_weight_fedex(weight_kg, length_cm, width_cm, height_cm)
-    return _lookup(table, billed)
+    base = _lookup(table, billed)
+    demand_rate = FEDEX_DEMAND_SURCHARGE_JPY_PER_KG.get(zone, 0)
+    demand = round(demand_rate * billed) if demand_rate else 0
+    return base + demand
 
 
 def get_shipping_jpy(

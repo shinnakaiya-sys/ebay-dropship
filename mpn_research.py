@@ -95,6 +95,24 @@ def is_japan_jan(code: str) -> bool:
         code.startswith("45") or code.startswith("49"))
 
 
+_AGE_LEVEL_NUM_RE = re.compile(r"\d+")
+
+
+def requires_cpc(age_level: str) -> bool:
+    """eBayのAge Level仕様値から、対象年齢3歳以上の子供向け玩具（CPC必須）かを判定する。
+    Adult・月齢のみの表記（3歳未満相当）・空欄は対象外。範囲表記(例: "8-13 Years")は
+    どちらかの端が3〜12歳に収まっていれば対象とする（一部でも子供向け対象年齢に
+    かかるならCPSIA上の「子供向け製品」に該当するため）。13歳以上のみの表記
+    （例: "13-17 Years"）は対象外。"""
+    if not age_level:
+        return False
+    v = age_level.strip().lower()
+    if "adult" in v or "month" in v:
+        return False
+    nums = [int(n) for n in _AGE_LEVEL_NUM_RE.findall(v)]
+    return any(3 <= n <= 12 for n in nums)
+
+
 def search_jan_by_mpn(mpn: str) -> str:
     """eBay Browse APIでMPNをキーワード検索し、日本製JANコード(GTIN)を探す。"""
     token = _get_browse_token()
@@ -210,8 +228,8 @@ def _browse_get_item(item_id: str, retry: int = 3) -> dict | None:
     return None
 
 
-def _extract_mpn_from_item(data: dict) -> tuple[str, str]:
-    """Browse APIレスポンスからMPNとGTINを抽出して返す。"""
+def _extract_mpn_from_item(data: dict) -> tuple[str, str, str]:
+    """Browse APIレスポンスからMPN・GTIN・Age Levelを抽出して返す。"""
     mpn = (data.get("mpn") or "").strip()
     if not mpn:
         for spec in data.get("localizedAspects", []):
@@ -227,7 +245,13 @@ def _extract_mpn_from_item(data: dict) -> tuple[str, str]:
                 gtin = spec.get("value", "").strip()
                 break
 
-    return mpn, gtin
+    age_level = ""
+    for spec in data.get("localizedAspects", []):
+        if spec.get("name", "").upper() == "AGE LEVEL":
+            age_level = spec.get("value", "").strip()
+            break
+
+    return mpn, gtin, age_level
 
 
 def _scrape_sold_ids(seller_id_or_url: str, max_items: int) -> list[str]:
@@ -335,8 +359,9 @@ def scrape_mpns_from_seller(seller_id_or_url: str, max_items: int = 50) -> list[
         return []
 
     print(f"\n  [Phase 1b] Browse APIでMPN取得中... ({len(item_ids)}件)")
-    mpn_set   = {}   # mpn → (title, gtin) — 重複管理しつつ情報も保持
-    total     = len(item_ids)
+    mpn_set      = {}   # mpn → (title, gtin) — 重複管理しつつ情報も保持
+    total        = len(item_ids)
+    cpc_excluded = 0
 
     for i, item_id in enumerate(item_ids, 1):
         data = _browse_get_item(item_id)
@@ -345,16 +370,20 @@ def scrape_mpns_from_seller(seller_id_or_url: str, max_items: int = 50) -> list[
             time.sleep(0.8)
             continue
 
-        mpn, gtin = _extract_mpn_from_item(data)
+        mpn, gtin, age_level = _extract_mpn_from_item(data)
         title     = data.get("title", "")[:50]
 
         if mpn and is_searchable_mpn(mpn):
-            if mpn not in mpn_set:
-                mpn_set[mpn] = (title, gtin)
-            label = f"MPN:{mpn}"
-            if gtin:
-                label += f" / GTIN:{gtin}"
-            print(f"  [{i}/{total}] {title[:40]}  → {label} ✅")
+            if requires_cpc(age_level):
+                cpc_excluded += 1
+                print(f"  [{i}/{total}] {title[:40]}  → CPC対象(Age Level: {age_level}) 除外")
+            else:
+                if mpn not in mpn_set:
+                    mpn_set[mpn] = (title, gtin)
+                label = f"MPN:{mpn}"
+                if gtin:
+                    label += f" / GTIN:{gtin}"
+                print(f"  [{i}/{total}] {title[:40]}  → {label} ✅")
         else:
             reason = f"MPN:{mpn}" if mpn else "MPN未登録"
             print(f"  [{i}/{total}] {title[:40]}  → {reason} (スキップ)")
@@ -363,6 +392,8 @@ def scrape_mpns_from_seller(seller_id_or_url: str, max_items: int = 50) -> list[
 
     mpn_jan_pairs = [(mpn, gtin if is_japan_jan(gtin) else "")
                      for mpn, (title, gtin) in mpn_set.items()]
+    if cpc_excluded:
+        print(f"\n  [cpc] 対象年齢3歳以上の子供向け玩具（CPC必須）のため除外: {cpc_excluded}件")
     print(f"\n  → MPN収集完了: {len(item_ids)}件中 {len(mpn_jan_pairs)}件の有効MPN")
     for mpn, (title, gtin) in mpn_set.items():
         gtin_note = f" (GTIN:{gtin})" if gtin else ""
@@ -558,7 +589,8 @@ def _create_ebay_driver():
 def research_one(mpn: str, rate: float, ws,
                  account: str = "kozuki", force: bool = False,
                  manual_sold: int = 0, driver=None, ebay_driver=None,
-                 dry_run: bool = False, known_jan: str = "") -> dict:
+                 dry_run: bool = False, known_jan: str = "",
+                 pending_ws=None) -> dict:
     print(f"\n{'─'*55}")
     print(f"  MPN: {mpn}")
     print(f"{'─'*55}")
@@ -580,6 +612,7 @@ def research_one(mpn: str, rate: float, ws,
         jan, rate, ws, dry_run,
         account=account, force=force, manual_sold=manual_sold,
         driver=driver, ebay_driver=ebay_driver,
+        pending_ws=pending_ws,
     )
     result["mpn"] = mpn
     result["jan"] = jan
@@ -636,7 +669,7 @@ def _stop_drivers(t_driver, ebay_driver) -> None:
 
 
 def run_research(mpn_pairs: list[tuple[str, str]], rate: float, ws, dry_run: bool,
-                 account: str, force: bool, manual_sold: int) -> dict:
+                 account: str, force: bool, manual_sold: int, pending_ws=None) -> dict:
     """
     (MPN, JAN)リストに対してリサーチを実行し、サマリー辞書を返す。
     BATCH_SIZE件ごとにTerapeak/eBayドライバーを再起動する。
@@ -661,7 +694,8 @@ def run_research(mpn_pairs: list[tuple[str, str]], rate: float, ws, dry_run: boo
                 result = research_one(mpn, rate, ws, account=account,
                                       force=force, manual_sold=manual_sold,
                                       driver=t_driver, ebay_driver=ebay_driver,
-                                      dry_run=dry_run, known_jan=known_jan)
+                                      dry_run=dry_run, known_jan=known_jan,
+                                      pending_ws=pending_ws)
 
                 if result["status"] == "skipped":
                     summary["skipped"].append(mpn)
@@ -780,9 +814,11 @@ def main():
     print(f"  ✅ USD/JPY: ¥{rate:.1f}")
 
     print(f"[初期化] スプレッドシート接続中...（連携先: jan_research.py「{jan_research.TAB_NAME}」タブ）")
-    creds  = Credentials.from_service_account_file(jan_research.JSON_FILE, scopes=jan_research.SCOPE)
-    client = gspread.authorize(creds)
-    ws     = client.open_by_key(jan_research.SPREADSHEET_ID).worksheet(jan_research.TAB_NAME)
+    creds       = Credentials.from_service_account_file(jan_research.JSON_FILE, scopes=jan_research.SCOPE)
+    client      = gspread.authorize(creds)
+    spreadsheet = client.open_by_key(jan_research.SPREADSHEET_ID)
+    ws          = spreadsheet.worksheet(jan_research.TAB_NAME)
+    pending_ws  = spreadsheet.worksheet(jan_research.PENDING_TAB_NAME)
     print("  ✅ 接続成功")
 
     total_summary = {"go": [], "no_go": [], "skipped": []}
@@ -811,7 +847,8 @@ def main():
             try:
                 mpns = scrape_mpns_from_seller(sid, max_items)
                 if mpns:
-                    s = run_research(mpns, rate, ws, dry_run, acct, force, manual_sold)
+                    s = run_research(mpns, rate, ws, dry_run, acct, force, manual_sold,
+                                     pending_ws=pending_ws)
                     _merge(s)
             except Exception as e:
                 print(f"  ⚠️  {sid} でエラー: {e}")
@@ -825,14 +862,16 @@ def main():
             print("❌ 有効なMPNが取得できませんでした。")
             sys.exit(1)
         print(f"\n[Phase 2] {len(mpns)}件のMPNをリサーチします")
-        s = run_research(mpns, rate, ws, dry_run, account, force, manual_sold)
+        s = run_research(mpns, rate, ws, dry_run, account, force, manual_sold,
+                         pending_ws=pending_ws)
         _merge(s)
 
     # ③ MPN直接指定
     else:
         print(f"[直接指定] {len(mpn_codes)}件のMPN")
         mpn_pairs = [(mpn, "") for mpn in mpn_codes]
-        s = run_research(mpn_pairs, rate, ws, dry_run, account, force, manual_sold)
+        s = run_research(mpn_pairs, rate, ws, dry_run, account, force, manual_sold,
+                         pending_ws=pending_ws)
         _merge(s)
 
     # ── サマリー ──────────────────────────────────────────
