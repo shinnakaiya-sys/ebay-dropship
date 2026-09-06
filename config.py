@@ -7,7 +7,14 @@ import os
 import requests
 from dotenv import load_dotenv
 
-load_dotenv()
+# 複数アカウント対応: EBAY_ENV_PATH が指定されていれば、そのアカウント専用
+# .env を優先して読み込む(既存の値は上書き)。未指定時は従来通りカレント
+# ディレクトリの .env を読む(kaworu2021運用への影響なし)。
+_account_env_path = os.getenv("EBAY_ENV_PATH")
+if _account_env_path:
+    load_dotenv(os.path.expanduser(_account_env_path), override=True)
+else:
+    load_dotenv()
 
 
 def _fetch_jpy_rate(fallback: float = 155.0) -> float:
@@ -30,18 +37,21 @@ CONFIG = {
     "KEEPA_API_KEY":      os.getenv("KEEPA_API_KEY"),
     "EBAY_TOKEN":         os.getenv("EBAY_TOKEN"),
     "EBAY_OAUTH_TOKEN":   os.getenv("EBAY_OAUTH_TOKEN"),   # Marketing API用（sell.marketing スコープ必須）
-    "EBAY_APP_ID":        os.getenv("EBAY_APP_ID"),        # Browse API用 Client ID
+    # EBAY_APP_ID / EBAY_CLIENT_ID はどちらの表記でも受け付ける(アカウントごとに
+    # .env内の呼称が異なる場合があるため。kaworu2021のEBAY_APP_ID運用は変更なし)
+    "EBAY_APP_ID":        os.getenv("EBAY_APP_ID") or os.getenv("EBAY_CLIENT_ID"),  # Browse API用 Client ID
     "EBAY_CLIENT_SECRET": os.getenv("EBAY_CLIENT_SECRET"), # Browse API用 Cert ID
     "EBAY_REFRESH_TOKEN": os.getenv("EBAY_REFRESH_TOKEN"), # ユーザートークン更新用（sell.analytics.readonly等）
     "EBAY_RUNAME":        os.getenv("EBAY_RUNAME"),        # OAuth認可コードフロー用のRuName
-    "EBAY_SELLER_ID":     os.getenv("EBAY_SELLER_ID", "kaworu2021"),  # 自分のセラーID
+    # EBAY_SELLER_ID未指定時はEBAY_ACCOUNT_NAMEで代替し、それも無ければ従来通りkaworu2021にフォールバック
+    "EBAY_SELLER_ID":     os.getenv("EBAY_SELLER_ID") or os.getenv("EBAY_ACCOUNT_NAME", "kaworu2021"),
     "ANTHROPIC_API_KEY":  os.getenv("ANTHROPIC_API_KEY"),
     "SLACK_WEBHOOK":      os.getenv("SLACK_WEBHOOK"),    # 任意
     "LINE_TOKEN":         os.getenv("LINE_TOKEN"),        # 任意
 
     # ── Google Sheets ────────────────────────────
     # スプレッドシートのURLの /d/〇〇〇/ の部分
-    "SHEET_ID":         os.getenv("SHEET_ID"),
+    "SHEET_ID":         os.getenv("SHEET_ID") or os.getenv("GOOGLE_SHEET_ID"),
     # サービスアカウントのJSONキーファイルパス
     "GSHEET_CRED_PATH": os.getenv("GSHEET_CRED_PATH", "credentials.json"),
 
