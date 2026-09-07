@@ -81,7 +81,6 @@ class KeepaChecker:
                     [asin],
                     domain='JP',       # Amazon.co.jp
                     history=True,      # CSVデータ取得に必要
-                    offers=20,         # 最小値20
                     stock=True,
                     wait=True,
                     progress_bar=False,

@@ -173,9 +173,28 @@ def test_analyze_items_finds_lowest_and_rank():
     ]
     result = analyze_items(items, my_seller_id="kaworu2021", my_item_id="", jpy_rate=JPY_RATE)
     assert result.count == 3
-    assert result.my_rank == 2
+    # rival_b の合計は $25.00 で自分と同額（安くはない）ため、
+    # 自分より安いのは rival_a の $30.00 のみ = 0件 → 順位は1位
+    assert result.my_rank == 1
     assert result.lowest_price == 25.00  # $20.00 + $5.00 shipping
     assert result.has_rival is True
+
+
+def test_analyze_items_rank_by_price_not_dom_order_regression():
+    """
+    eBayの「価格の安い順」ソートは実際には厳密な昇順にならないことがあり、
+    自分の出品がDOM上で先頭に出現しても、後方により安い競合が
+    紛れ込むケースがある（実データで確認済み）。
+    順位はDOM出現順ではなく、実際の価格比較で決まるべき。
+    """
+    items = [
+        RawItem(item_id="1", seller_text="kaworu2021", price_text="$92.15", shipping_text="Free shipping"),
+        RawItem(item_id="2", seller_text="rival_a", price_text="$71.32", shipping_text="Free shipping"),
+        RawItem(item_id="3", seller_text="rival_b", price_text="$93.60", shipping_text="Free shipping"),
+    ]
+    result = analyze_items(items, my_seller_id="kaworu2021", my_item_id="", jpy_rate=JPY_RATE)
+    # 自分より安いのは rival_a ($71.32) のみ → 2位
+    assert result.my_rank == 2
 
 
 def test_analyze_items_no_rivals():

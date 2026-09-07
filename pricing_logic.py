@@ -180,26 +180,34 @@ def analyze_items(items: list[RawItem], my_seller_id: str, my_item_id: str,
                   jpy_rate: float) -> ScrapeResult:
     """RawItem のリストから競合最安値・自分の順位・出品数を求める"""
     result = ScrapeResult()
+    my_total: float | None = None
 
     for item in items:
         if not item.item_id:
             continue
         result.count += 1
 
-        if is_my_listing(item, my_seller_id, my_item_id):
-            if result.my_rank is None:
-                result.my_rank = result.count
-            continue
-
         price = parse_price_usd(item.price_text, jpy_rate)
-        if price <= 0:
+        shipping = parse_shipping_usd(item.shipping_text, jpy_rate)
+        total = round(price + shipping, 2) if price > 0 else None
+
+        if is_my_listing(item, my_seller_id, my_item_id):
+            if my_total is None and total is not None:
+                my_total = total
             continue
 
-        shipping = parse_shipping_usd(item.shipping_text, jpy_rate)
-        result.competitor_totals.append(round(price + shipping, 2))
+        if total is not None:
+            result.competitor_totals.append(total)
 
     if result.competitor_totals:
         result.lowest_price = round(min(result.competitor_totals), 2)
+
+    if my_total is not None:
+        # eBayの「価格の安い順」ソートは実際には厳密な昇順ではないため、
+        # DOM上の出現位置ではなく実際の価格比較で順位を算出する
+        # （自分より安い競合の件数 + 1）
+        result.my_rank = sum(1 for t in result.competitor_totals if t < my_total) + 1
+
     return result
 
 
